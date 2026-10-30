@@ -1,3 +1,6 @@
+// Copyright 2026 The Gitea Authors. All rights reserved.
+// SPDX-License-Identifier: MIT
+
 package page
 
 import (
@@ -11,11 +14,11 @@ import (
 
 func TestACMERateLimitRetrySurvivesRestart(t *testing.T) {
 	root := t.TempDir()
-	store, err := OpenStore(root)
+	store, err := OpenStore(root, defaultEtcdQuotaBytes)
 	if err != nil {
 		t.Fatal(err)
 	}
-	manager, err := NewACMEManager(store, "http://127.0.0.1:1/directory", "pages@example.test")
+	manager, err := NewACMEManager(store, "http://127.0.0.1:1/directory", "pages@example.test", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -26,12 +29,12 @@ func TestACMERateLimitRetrySurvivesRestart(t *testing.T) {
 	}
 	store.Close()
 
-	store, err = OpenStore(root)
+	store, err = OpenStore(root, defaultEtcdQuotaBytes)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer store.Close()
-	manager, err = NewACMEManager(store, "http://127.0.0.1:1/directory", "pages@example.test")
+	manager, err = NewACMEManager(store, "http://127.0.0.1:1/directory", "pages@example.test", "")
 	if err != nil {
 		t.Fatal(err)
 	}

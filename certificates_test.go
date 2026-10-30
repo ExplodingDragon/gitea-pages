@@ -1,3 +1,6 @@
+// Copyright 2026 The Gitea Authors. All rights reserved.
+// SPDX-License-Identifier: MIT
+
 package page
 
 import (
@@ -37,7 +40,7 @@ func testCertificate(t *testing.T, host string) CertificateRecord {
 
 func TestCertificateManagerPersistsAndSelectsSNI(t *testing.T) {
 	root := t.TempDir()
-	store, err := OpenStore(root)
+	store, err := OpenStore(root, defaultEtcdQuotaBytes)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -57,11 +60,11 @@ func TestCertificateManagerPersistsAndSelectsSNI(t *testing.T) {
 	}
 	keyPath := filepath.Join(nginxRoot, "certs", "custom.example", "privkey.pem")
 	keyInfo, err := os.Stat(keyPath)
-	if err != nil || keyInfo.Mode().Perm() != 0600 {
+	if err != nil || keyInfo.Mode().Perm() != 0o600 {
 		t.Fatalf("Nginx private key mode: info=%v err=%v", keyInfo, err)
 	}
 	store.Close()
-	store, err = OpenStore(root)
+	store, err = OpenStore(root, defaultEtcdQuotaBytes)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -76,7 +79,7 @@ func TestCertificateManagerPersistsAndSelectsSNI(t *testing.T) {
 }
 
 func TestCertificateManagerRejectsCertificateForAnotherHost(t *testing.T) {
-	store, err := OpenStore(t.TempDir())
+	store, err := OpenStore(t.TempDir(), defaultEtcdQuotaBytes)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -93,7 +96,7 @@ func TestCertificateManagerRejectsCertificateForAnotherHost(t *testing.T) {
 }
 
 func TestCertificateManagerDoesNotUseDefaultForCustomRenewal(t *testing.T) {
-	store, err := OpenStore(t.TempDir())
+	store, err := OpenStore(t.TempDir(), defaultEtcdQuotaBytes)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -113,7 +116,7 @@ func TestCertificateManagerDoesNotUseDefaultForCustomRenewal(t *testing.T) {
 }
 
 func TestCertificateManagerLoadsOperatorHostCertificate(t *testing.T) {
-	store, err := OpenStore(t.TempDir())
+	store, err := OpenStore(t.TempDir(), defaultEtcdQuotaBytes)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -123,16 +126,16 @@ func TestCertificateManagerLoadsOperatorHostCertificate(t *testing.T) {
 	record := testCertificate(t, host)
 	sum := sha256.Sum256([]byte(host))
 	dir := filepath.Join(root, "hosts", hex.EncodeToString(sum[:]))
-	if err := os.MkdirAll(dir, 0755); err != nil {
+	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(dir, "host"), []byte(host+"\n"), 0644); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, "host"), []byte(host+"\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(dir, "fullchain.pem"), []byte(record.CertificatePEM), 0644); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, "fullchain.pem"), []byte(record.CertificatePEM), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(dir, "privkey.pem"), []byte(record.PrivateKeyPEM), 0600); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, "privkey.pem"), []byte(record.PrivateKeyPEM), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	m, err := NewCertificateManager(store, root)
@@ -145,16 +148,16 @@ func TestCertificateManagerLoadsOperatorHostCertificate(t *testing.T) {
 }
 
 func TestCertificateManagerRejectsPartialDefaultCertificateFiles(t *testing.T) {
-	store, err := OpenStore(t.TempDir())
+	store, err := OpenStore(t.TempDir(), defaultEtcdQuotaBytes)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer store.Close()
 	root := t.TempDir()
-	if err := os.MkdirAll(filepath.Join(root, "default"), 0755); err != nil {
+	if err := os.MkdirAll(filepath.Join(root, "default"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(root, "default", "fullchain.pem"), []byte("certificate"), 0644); err != nil {
+	if err := os.WriteFile(filepath.Join(root, "default", "fullchain.pem"), []byte("certificate"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := NewCertificateManager(store, root); err == nil {
@@ -163,7 +166,7 @@ func TestCertificateManagerRejectsPartialDefaultCertificateFiles(t *testing.T) {
 }
 
 func TestPruneUnusedACMECertificates(t *testing.T) {
-	store, err := OpenStore(t.TempDir())
+	store, err := OpenStore(t.TempDir(), defaultEtcdQuotaBytes)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -206,7 +209,7 @@ func TestPruneUnusedACMECertificates(t *testing.T) {
 
 func TestCertificateManagerRemovesStaleACMEDefault(t *testing.T) {
 	root := t.TempDir()
-	store, err := OpenStore(root)
+	store, err := OpenStore(root, defaultEtcdQuotaBytes)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -227,7 +230,7 @@ func TestCertificateManagerRemovesStaleACMEDefault(t *testing.T) {
 		t.Fatal("stale ACME default certificate remains usable")
 	}
 	store.Close()
-	store, err = OpenStore(root)
+	store, err = OpenStore(root, defaultEtcdQuotaBytes)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -242,7 +245,7 @@ func TestCertificateManagerRemovesStaleACMEDefault(t *testing.T) {
 }
 
 func TestCertificateManagerRejectsStaleOperatorDefault(t *testing.T) {
-	store, err := OpenStore(t.TempDir())
+	store, err := OpenStore(t.TempDir(), defaultEtcdQuotaBytes)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -264,28 +267,28 @@ func TestCertificateManagerRejectsStaleOperatorDefault(t *testing.T) {
 
 func TestCertificateManagerPrunesRemovedOperatorHost(t *testing.T) {
 	root := t.TempDir()
-	store, err := OpenStore(t.TempDir())
+	store, err := OpenStore(t.TempDir(), defaultEtcdQuotaBytes)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer store.Close()
 	host := "custom.example"
 	record := testCertificate(t, host)
-	if err := os.MkdirAll(filepath.Join(root, "hosts"), 0755); err != nil {
+	if err := os.MkdirAll(filepath.Join(root, "hosts"), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	sum := sha256.Sum256([]byte(host))
 	dir := filepath.Join(root, "hosts", hex.EncodeToString(sum[:]))
-	if err := os.MkdirAll(dir, 0755); err != nil {
+	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(dir, "host"), []byte(host), 0644); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, "host"), []byte(host), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(dir, "fullchain.pem"), []byte(record.CertificatePEM), 0644); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, "fullchain.pem"), []byte(record.CertificatePEM), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(dir, "privkey.pem"), []byte(record.PrivateKeyPEM), 0600); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, "privkey.pem"), []byte(record.PrivateKeyPEM), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	m, err := NewCertificateManager(store, root)

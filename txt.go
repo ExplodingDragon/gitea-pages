@@ -1,11 +1,14 @@
+// Copyright 2026 The Gitea Authors. All rights reserved.
+// SPDX-License-Identifier: MIT
+
 package page
 
 import (
 	"context"
 	"errors"
-	"fmt"
 	"net"
 	"strings"
+	"time"
 )
 
 type TXTVerificationResult string
@@ -16,15 +19,19 @@ const (
 	TXTTemporaryError TXTVerificationResult = "temporary_error"
 )
 
-// VerifyTXTResult distinguishes an explicit loss of the binding from a DNS
-// outage. Callers use the distinction to keep a recently valid binding during
-// a short resolver failure while immediately closing it after NXDOMAIN,
-// NODATA, or a value mismatch.
-func VerifyTXTResult(ctx context.Context, host, expected string) (TXTVerificationResult, error) {
+// VerifyTXTResult distinguishes an absent or wrong record from a temporary DNS
+// outage. Callers retain the result for status reporting while applying the
+// same grace period to every failure after a successful verification.
+func VerifyTXTResult(ctx context.Context, resolver *net.Resolver, host, expected string) (TXTVerificationResult, error) {
 	if host == "" || expected == "" {
-		return TXTInvalid, fmt.Errorf("empty TXT binding")
+		return TXTInvalid, errors.New("empty TXT binding")
 	}
-	values, err := net.DefaultResolver.LookupTXT(ctx, "_gitea-pages."+strings.TrimSuffix(host, "."))
+	if resolver == nil {
+		resolver = net.DefaultResolver
+	}
+	lookupCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	values, err := resolver.LookupTXT(lookupCtx, "_gitea-pages."+strings.TrimSuffix(host, "."))
 	if err != nil {
 		var dnsErr *net.DNSError
 		if errors.As(err, &dnsErr) && dnsErr.IsNotFound {
@@ -40,5 +47,18 @@ func VerifyTXTResult(ctx context.Context, host, expected string) (TXTVerificatio
 			return TXTValid, nil
 		}
 	}
-	return TXTInvalid, fmt.Errorf("TXT value does not match")
+	return TXTInvalid, errors.New("TXT value does not match")
+}
+
+func newDNSResolver(address string) *net.Resolver {
+	if address == "" {
+		return net.DefaultResolver
+	}
+	dialer := &net.Dialer{Timeout: 5 * time.Second}
+	return &net.Resolver{
+		PreferGo: true,
+		Dial: func(ctx context.Context, network, _ string) (net.Conn, error) {
+			return dialer.DialContext(ctx, network, address)
+		},
+	}
 }

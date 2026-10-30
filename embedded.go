@@ -1,9 +1,14 @@
+// Copyright 2026 The Gitea Authors. All rights reserved.
+// SPDX-License-Identifier: MIT
+
 package page
 
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"log/slog"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -14,20 +19,22 @@ import (
 	"go.etcd.io/etcd/server/v3/embed"
 )
 
-// EmbeddedKV starts a single etcd member and calls its server API directly.
-// No client or peer socket is exposed; the Pages process is the only caller.
+const embeddedKVPageSize = 1000
+
+// EmbeddedKV calls a single embedded etcd member through its server API.
 type EmbeddedKV struct {
 	etcd *embed.Etcd
 	stop chan struct{}
 	wg   sync.WaitGroup
 }
 
+// StartEmbeddedKV starts local durable state without client or peer listeners.
 func StartEmbeddedKV(root string, quota int64) (*EmbeddedKV, error) {
 	dir := filepath.Join(root, "etcd")
-	if err := os.MkdirAll(dir, 0700); err != nil {
+	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return nil, fmt.Errorf("create embedded etcd directory: %w", err)
 	}
-	if err := os.Chmod(dir, 0700); err != nil {
+	if err := os.Chmod(dir, 0o700); err != nil {
 		return nil, fmt.Errorf("protect embedded etcd directory: %w", err)
 	}
 	cfg := embed.NewConfig()
@@ -57,7 +64,7 @@ func StartEmbeddedKV(root string, quota int64) (*EmbeddedKV, error) {
 	case <-e.Server.ReadyNotify():
 	case <-time.After(30 * time.Second):
 		e.Close()
-		return nil, fmt.Errorf("embedded etcd ready timeout")
+		return nil, errors.New("embedded etcd ready timeout")
 	}
 	k := &EmbeddedKV{etcd: e, stop: make(chan struct{})}
 	k.wg.Add(1)
@@ -87,7 +94,7 @@ func (k *EmbeddedKV) maintain() {
 			backend := k.etcd.Server.Backend()
 			if backend.Size()-backend.SizeInUse() >= 64*1024*1024 {
 				if err := k.etcd.Server.Defragment(); err != nil {
-					fmt.Fprintf(os.Stderr, "pages embedded etcd defragmentation: %v\n", err)
+					slog.Error("embedded etcd defragmentation failed", "error", err)
 				}
 			}
 		}
@@ -123,22 +130,41 @@ func (k *EmbeddedKV) Delete(ctx context.Context, key string) error {
 }
 
 func (k *EmbeddedKV) ListPrefix(ctx context.Context, prefix string, out func(key string, value []byte) error) error {
-	end := append([]byte(nil), []byte(prefix)...)
+	start, end := []byte(prefix), prefixRangeEnd(prefix)
+	for {
+		resp, err := k.etcd.Server.Range(ctx, &etcdserverpb.RangeRequest{
+			Key: start, RangeEnd: end, Limit: embeddedKVPageSize,
+			SortOrder: etcdserverpb.RangeRequest_ASCEND, SortTarget: etcdserverpb.RangeRequest_KEY,
+		})
+		if err != nil {
+			return err
+		}
+		for _, kv := range resp.Kvs {
+			if err := out(string(kv.Key), kv.Value); err != nil {
+				return err
+			}
+		}
+		if !resp.More || len(resp.Kvs) == 0 {
+			return nil
+		}
+		start = append(append([]byte(nil), resp.Kvs[len(resp.Kvs)-1].Key...), 0)
+	}
+}
+
+func (k *EmbeddedKV) DeletePrefix(ctx context.Context, prefix string) error {
+	_, err := k.etcd.Server.DeleteRange(ctx, &etcdserverpb.DeleteRangeRequest{
+		Key: []byte(prefix), RangeEnd: prefixRangeEnd(prefix),
+	})
+	return err
+}
+
+func prefixRangeEnd(prefix string) []byte {
+	end := append([]byte(nil), prefix...)
 	for i := len(end) - 1; i >= 0; i-- {
 		if end[i] < 0xff {
 			end[i]++
-			end = end[:i+1]
-			break
+			return end[:i+1]
 		}
 	}
-	resp, err := k.etcd.Server.Range(ctx, &etcdserverpb.RangeRequest{Key: []byte(prefix), RangeEnd: end})
-	if err != nil {
-		return err
-	}
-	for _, kv := range resp.Kvs {
-		if err := out(string(kv.Key), kv.Value); err != nil {
-			return err
-		}
-	}
-	return nil
+	return []byte{0}
 }

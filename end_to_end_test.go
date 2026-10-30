@@ -1,3 +1,6 @@
+// Copyright 2026 The Gitea Authors. All rights reserved.
+// SPDX-License-Identifier: MIT
+
 package page
 
 import (
@@ -39,7 +42,8 @@ func TestSyncDeployAndServe(t *testing.T) {
 
 	var mu sync.Mutex
 	updated := false
-	var reports []Result
+	var reports []DeploymentResult
+	reportCh := make(chan DeploymentResult, 4)
 	gitea := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Header.Get("Authorization") != "Bearer page-token" {
 			http.Error(w, "missing page token", http.StatusUnauthorized)
@@ -58,12 +62,12 @@ func TestSyncDeployAndServe(t *testing.T) {
 		case r.Method == http.MethodGet && (r.URL.Path == "/api/internal/pages/sites" || r.URL.Path == "/api/internal/pages/sites/updated"):
 			full := r.URL.Path == "/api/internal/pages/sites" && r.URL.Query().Get("since") == ""
 			w.Header().Set("Content-Type", "application/json")
-			response := SitesResponse{RootURL: rootURL.String(), RootUpdatedUnixNano: 1, NextSince: 10, Until: 10}
+			response := SitesResponse{RootURL: rootURL.String(), RootUpdatedUnixNano: 1, ArchiveLimits: testArchiveLimits(), RequireGiteaTXTRecord: true, Until: 10}
 			if full {
 				response.Sites = []Site{firstSite}
 			} else if currentUpdated {
 				response.Sites = []Site{secondSite}
-				response.NextSince, response.Until = 20, 20
+				response.Until = 20
 			}
 			if err := json.NewEncoder(w).Encode(response); err != nil {
 				t.Errorf("encode site response: %v", err)
@@ -75,13 +79,14 @@ func TestSyncDeployAndServe(t *testing.T) {
 			w.WriteHeader(http.StatusOK)
 			_, _ = w.Write(secondArchive)
 		case r.Method == http.MethodPost && r.URL.Path == "/api/internal/pages/results":
-			var result Result
+			var result DeploymentResult
 			if err := json.NewDecoder(r.Body).Decode(&result); err != nil {
 				t.Fatalf("decode deployment result: %v", err)
 			}
 			mu.Lock()
 			reports = append(reports, result)
 			mu.Unlock()
+			reportCh <- result
 			w.WriteHeader(http.StatusNoContent)
 		default:
 			http.NotFound(w, r)
@@ -90,7 +95,7 @@ func TestSyncDeployAndServe(t *testing.T) {
 	defer gitea.Close()
 
 	dataRoot := t.TempDir()
-	store, err := OpenStore(dataRoot)
+	store, err := OpenStore(dataRoot, defaultEtcdQuotaBytes)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -101,7 +106,7 @@ func TestSyncDeployAndServe(t *testing.T) {
 		t.Fatal(err)
 	}
 	pageServer := newTestServer(t, store, rootURL)
-	webServer := &http.Server{Handler: pageServer.Handler()}
+	webServer := &http.Server{Handler: pageServer.Handler(false)}
 	serveDone := make(chan error, 1)
 	go func() { serveDone <- webServer.Serve(listener) }()
 	defer func() {
@@ -125,17 +130,17 @@ func TestSyncDeployAndServe(t *testing.T) {
 		DeployTimeout:     time.Minute,
 	}
 	syncer := NewSyncer(cfg, NewClient(cfg), store, pageServer, nil)
-	if err := syncer.full(context.Background()); err != nil {
+	if err := syncer.syncAllSites(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	workerCtx, cancel := context.WithCancel(context.Background())
-	syncer.StartWorkers(workerCtx)
+	syncer.startWorkers(workerCtx)
 	defer func() {
 		cancel()
-		syncer.WaitWorkers()
+		syncer.workers.Wait()
 	}()
-	syncer.enqueuePending()
-	waitForReport(t, &mu, &reports, firstDigest)
+	syncer.requestPendingScan()
+	waitForReport(t, reportCh, firstDigest)
 	assertSiteBody(t, listener.Addr().String(), "alice.pages.example.test", "first page")
 
 	mu.Lock()
@@ -144,8 +149,8 @@ func TestSyncDeployAndServe(t *testing.T) {
 	if err := syncer.syncOnce(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	syncer.enqueuePending()
-	waitForReport(t, &mu, &reports, secondDigest)
+	syncer.requestPendingScan()
+	waitForReport(t, reportCh, secondDigest)
 	assertSiteBody(t, listener.Addr().String(), "alice.pages.example.test", "updated page")
 
 	mu.Lock()
@@ -162,7 +167,7 @@ func TestSyncDeployAndServe(t *testing.T) {
 
 func archiveBytes(t *testing.T, body string) []byte {
 	t.Helper()
-	f := makeArchive(t, testTarEntry{name: "index.html", kind: tar.TypeReg, body: body, mode: 0755})
+	f := makeArchive(t, testTarEntry{name: "index.html", kind: tar.TypeReg, body: body, mode: 0o755})
 	defer func() { _ = f.Close() }()
 	data, err := io.ReadAll(f)
 	if err != nil {
@@ -176,21 +181,16 @@ func archiveDigest(data []byte) string {
 	return hex.EncodeToString(h[:])
 }
 
-func waitForReport(t *testing.T, mu *sync.Mutex, reports *[]Result, digest string) {
+func waitForReport(t *testing.T, reports <-chan DeploymentResult, digest string) {
 	t.Helper()
-	deadline := time.Now().Add(10 * time.Second)
-	for time.Now().Before(deadline) {
-		mu.Lock()
-		for _, report := range *reports {
-			if report.ActualTarGzSHA256 == digest {
-				mu.Unlock()
-				return
-			}
+	select {
+	case report := <-reports:
+		if report.ActualTarGzSHA256 != digest {
+			t.Fatalf("deployment report digest = %q, want %q", report.ActualTarGzSHA256, digest)
 		}
-		mu.Unlock()
-		time.Sleep(10 * time.Millisecond)
+	case <-time.After(10 * time.Second):
+		t.Fatalf("timed out waiting for deployment report %s", digest)
 	}
-	t.Fatalf("timed out waiting for deployment report %s", digest)
 }
 
 func assertSiteBody(t *testing.T, address, host, want string) {

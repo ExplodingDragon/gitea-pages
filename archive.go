@@ -1,3 +1,6 @@
+// Copyright 2026 The Gitea Authors. All rights reserved.
+// SPDX-License-Identifier: MIT
+
 package page
 
 import (
@@ -5,8 +8,10 @@ import (
 	"bufio"
 	"compress/gzip"
 	"context"
+	"errors"
 	"fmt"
 	"io"
+	"math"
 	"os"
 	"path"
 	"path/filepath"
@@ -20,14 +25,9 @@ import (
 )
 
 const (
-	maxCompressedArchiveBytes int64 = 100 * 1024 * 1024
-	maxArchiveEntries               = 10000
-	maxSiteBytes              int64 = 512 * 1024 * 1024
-	maxFileBytes              int64 = 100 * 1024 * 1024
-	maxPathBytes                    = 1024
-	maxPathDepth                    = 32
-	maxLinkDepth                    = 32
-	maxTarBytes               int64 = maxSiteBytes + int64(maxArchiveEntries)*4096 + 1*1024*1024
+	maxPathBytes = 1024
+	maxPathDepth = 32
+	maxLinkDepth = 32
 )
 
 type archiveEntry struct {
@@ -37,7 +37,12 @@ type archiveEntry struct {
 	link string
 }
 
-func ExtractTarGz(ctx context.Context, src *os.File, target string, repoID int64, digest string) (retErr error) {
+// ExtractTarGz validates and expands one site into a new target directory.
+func ExtractTarGz(ctx context.Context, src *os.File, target string, repoID int64, digest string, limits ArchiveLimits) (retErr error) {
+	maxTarBytes, err := limits.maxTarBytes()
+	if err != nil {
+		return err
+	}
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -46,8 +51,8 @@ func ExtractTarGz(ctx context.Context, src *os.File, target string, repoID int64
 	}
 	if info, err := src.Stat(); err != nil {
 		return err
-	} else if info.Size() > maxCompressedArchiveBytes {
-		return fmt.Errorf("compressed archive exceeds %d bytes", maxCompressedArchiveBytes)
+	} else if info.Size() > limits.MaxTarGzBytes {
+		return fmt.Errorf("compressed archive exceeds %d bytes", limits.MaxTarGzBytes)
 	}
 	buffered := bufio.NewReader(src)
 	gz, err := gzip.NewReader(buffered)
@@ -68,11 +73,11 @@ func ExtractTarGz(ctx context.Context, src *os.File, target string, repoID int64
 	entries := make(map[string]archiveEntry)
 	canonical := make(map[string]string)
 	if _, err := os.Lstat(target); err == nil {
-		return fmt.Errorf("archive target already exists")
+		return errors.New("archive target already exists")
 	} else if !os.IsNotExist(err) {
 		return err
 	}
-	if err := os.MkdirAll(target, 0755); err != nil {
+	if err := os.MkdirAll(target, 0o755); err != nil {
 		return err
 	}
 	tempDir, err := os.MkdirTemp(target, ".archive-")
@@ -96,8 +101,8 @@ func ExtractTarGz(ctx context.Context, src *os.File, target string, repoID int64
 			return fmt.Errorf("tar: %w", err)
 		}
 		count++
-		if count > maxArchiveEntries {
-			return fmt.Errorf("too many archive entries")
+		if count > limits.MaxEntries {
+			return errors.New("too many archive entries")
 		}
 		name, err := archivePath(h.Name)
 		if err != nil {
@@ -124,7 +129,7 @@ func ExtractTarGz(ctx context.Context, src *os.File, target string, repoID int64
 		switch h.Typeflag {
 		case tar.TypeReg:
 			kind = 'f'
-			if h.Size < 0 || h.Size > maxFileBytes {
+			if h.Size < 0 || h.Size > limits.MaxFileBytes {
 				return fmt.Errorf("file %q is too large", name)
 			}
 		case tar.TypeDir:
@@ -145,8 +150,8 @@ func ExtractTarGz(ctx context.Context, src *os.File, target string, repoID int64
 		}
 		if kind == 'f' {
 			regularFiles++
-			if total+h.Size > maxSiteBytes {
-				return fmt.Errorf("site is too large")
+			if h.Size > limits.MaxSiteBytes-total {
+				return errors.New("site is too large")
 			}
 			total += h.Size
 			tmp, e := os.CreateTemp(tempDir, "file-")
@@ -174,7 +179,7 @@ func ExtractTarGz(ctx context.Context, src *os.File, target string, repoID int64
 		n, readErr := tarData.Read(tail[:])
 		for _, b := range tail[:n] {
 			if b != 0 {
-				return fmt.Errorf("non-zero data after TAR end")
+				return errors.New("non-zero data after TAR end")
 			}
 		}
 		if readErr == io.EOF {
@@ -188,15 +193,15 @@ func ExtractTarGz(ctx context.Context, src *os.File, target string, repoID int64
 		return fmt.Errorf("TAR data exceeds %d bytes", maxTarBytes)
 	}
 	if _, err := buffered.Peek(1); err == nil {
-		return fmt.Errorf("gzip stream has more than one member or trailing data")
+		return errors.New("gzip stream has more than one member or trailing data")
 	} else if err != io.EOF {
 		return fmt.Errorf("read after gzip stream: %w", err)
 	}
 	if len(entries) == 0 {
-		return fmt.Errorf("empty site archive")
+		return errors.New("empty site archive")
 	}
 	if regularFiles == 0 {
-		return fmt.Errorf("site archive has no regular file")
+		return errors.New("site archive has no regular file")
 	}
 	if err := validateArchive(entries); err != nil {
 		return err
@@ -211,7 +216,7 @@ func ExtractTarGz(ctx context.Context, src *os.File, target string, repoID int64
 		if e.kind != 'd' {
 			continue
 		}
-		if err := os.MkdirAll(filepath.Join(target, filepath.FromSlash(n)), 0755); err != nil {
+		if err := os.MkdirAll(filepath.Join(target, filepath.FromSlash(n)), 0o755); err != nil {
 			return err
 		}
 	}
@@ -221,10 +226,10 @@ func ExtractTarGz(ctx context.Context, src *os.File, target string, repoID int64
 			continue
 		}
 		p := filepath.Join(target, filepath.FromSlash(n))
-		if err := os.MkdirAll(filepath.Dir(p), 0755); err != nil {
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
 			return err
 		}
-		if err := os.Chmod(e.temp, 0600); err != nil {
+		if err := os.Chmod(e.temp, 0o600); err != nil {
 			return err
 		}
 		if err := os.Rename(e.temp, p); err != nil {
@@ -232,7 +237,7 @@ func ExtractTarGz(ctx context.Context, src *os.File, target string, repoID int64
 		}
 		// Published files are always data files. Archive mode bits are not
 		// allowed to make a served file executable.
-		if err := os.Chmod(p, 0644); err != nil {
+		if err := os.Chmod(p, 0o644); err != nil {
 			return err
 		}
 	}
@@ -242,7 +247,7 @@ func ExtractTarGz(ctx context.Context, src *os.File, target string, repoID int64
 			continue
 		}
 		p := filepath.Join(target, filepath.FromSlash(n))
-		if err := os.MkdirAll(filepath.Dir(p), 0755); err != nil {
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
 			return err
 		}
 		if err := os.Symlink(e.link, p); err != nil {
@@ -250,15 +255,24 @@ func ExtractTarGz(ctx context.Context, src *os.File, target string, repoID int64
 		}
 	}
 	probe := filepath.Join(target, ".gitea-pages-probe")
-	if err := os.WriteFile(probe, []byte(fmt.Sprintf("%d %s\n", repoID, digest)), 0644); err != nil {
+	if err := os.WriteFile(probe, []byte(fmt.Sprintf("%d %s\n", repoID, digest)), 0o644); err != nil {
 		return err
 	}
 	return nil
 }
 
+func (l ArchiveLimits) maxTarBytes() (int64, error) {
+	const archiveOverhead = int64(1024 * 1024)
+	if l.MaxTarGzBytes <= 0 || l.MaxTarGzBytes == math.MaxInt64 || l.MaxSiteBytes <= 0 || l.MaxFileBytes <= 0 || l.MaxFileBytes > l.MaxSiteBytes || l.MaxEntries <= 0 ||
+		l.MaxSiteBytes > math.MaxInt64-archiveOverhead || int64(l.MaxEntries) > (math.MaxInt64-l.MaxSiteBytes-archiveOverhead)/4096 {
+		return 0, errors.New("invalid archive limits from Gitea")
+	}
+	return l.MaxSiteBytes + int64(l.MaxEntries)*4096 + archiveOverhead, nil
+}
+
 func archivePath(raw string) (string, error) {
 	if raw == "" || !utf8.ValidString(raw) || strings.ContainsRune(raw, '\x00') || strings.ContainsRune(raw, '\\') || len(raw) > maxPathBytes {
-		return "", fmt.Errorf("invalid archive path")
+		return "", errors.New("invalid archive path")
 	}
 	if strings.HasPrefix(raw, "/") || strings.HasPrefix(raw, "//") || windowsArchiveVolume(raw) {
 		return "", fmt.Errorf("absolute archive path %q", raw)
@@ -293,7 +307,7 @@ func archivePath(raw string) (string, error) {
 
 func validateLink(raw string) error {
 	if raw == "" || !utf8.ValidString(raw) || len(raw) > maxPathBytes || strings.ContainsRune(raw, '\x00') || strings.ContainsRune(raw, '\\') || hasArchiveControl(raw) || strings.HasPrefix(raw, "/") || strings.HasPrefix(raw, "//") || windowsArchiveVolume(raw) {
-		return fmt.Errorf("invalid relative target")
+		return errors.New("invalid relative target")
 	}
 	return nil
 }
@@ -358,7 +372,7 @@ func validateArchive(es map[string]archiveEntry) error {
 
 func resolveArchiveLink(name string, es map[string]archiveEntry, depth int) (string, error) {
 	if depth > maxLinkDepth {
-		return "", fmt.Errorf("symlink depth exceeded")
+		return "", errors.New("symlink depth exceeded")
 	}
 	e := es[name]
 	target := e.link
@@ -387,11 +401,11 @@ func resolveArchiveLink(name string, es map[string]archiveEntry, depth int) (str
 
 func resolveArchivePath(name string, es map[string]archiveEntry, depth int) (string, error) {
 	if depth > maxLinkDepth {
-		return "", fmt.Errorf("symlink depth exceeded")
+		return "", errors.New("symlink depth exceeded")
 	}
 	clean := path.Clean(name)
 	if clean == "." || clean == ".." || strings.HasPrefix(clean, "../") {
-		return "", fmt.Errorf("symlink escapes site")
+		return "", errors.New("symlink escapes site")
 	}
 	parts := strings.Split(clean, "/")
 	for i := 1; i <= len(parts); i++ {

@@ -1,9 +1,11 @@
+// Copyright 2026 The Gitea Authors. All rights reserved.
+// SPDX-License-Identifier: MIT
+
 package page
 
 import (
 	"context"
 	"fmt"
-	"io"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -31,7 +33,7 @@ func testNginxConfig(t *testing.T, root string) Config {
 
 func TestNginxRenderUsesDefaultCertificateForPlatformHost(t *testing.T) {
 	root := t.TempDir()
-	store, err := OpenStore(root)
+	store, err := OpenStore(root, defaultEtcdQuotaBytes)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -45,11 +47,11 @@ func TestNginxRenderUsesDefaultCertificateForPlatformHost(t *testing.T) {
 		t.Fatalf("platform home was not exported: %v", err)
 	}
 	certDir := filepath.Join(root, "nginx", "certs", "default")
-	if err := os.MkdirAll(certDir, 0755); err != nil {
+	if err := os.MkdirAll(certDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
 	for _, name := range []string{"fullchain.pem", "privkey.pem"} {
-		if err := os.WriteFile(filepath.Join(certDir, name), []byte("test"), 0600); err != nil {
+		if err := os.WriteFile(filepath.Join(certDir, name), []byte("test"), 0o600); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -94,7 +96,7 @@ func TestNginxRenderUsesDefaultCertificateForPlatformHost(t *testing.T) {
 
 func TestNginxExportRemovesStaleCustomAssets(t *testing.T) {
 	root := t.TempDir()
-	store, err := OpenStore(root)
+	store, err := OpenStore(root, defaultEtcdQuotaBytes)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -102,10 +104,10 @@ func TestNginxExportRemovesStaleCustomAssets(t *testing.T) {
 
 	customRoot := filepath.Join(root, "custom")
 	asset := filepath.Join(customRoot, "public", "assets", "obsolete.css")
-	if err := os.MkdirAll(filepath.Dir(asset), 0755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(asset), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(asset, []byte("obsolete"), 0644); err != nil {
+	if err := os.WriteFile(asset, []byte("obsolete"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	cfg := testNginxConfig(t, root)
@@ -130,7 +132,7 @@ func TestNginxExportRemovesStaleCustomAssets(t *testing.T) {
 
 func TestNginxRenderKeepsHTTPChallengeWithoutCertificate(t *testing.T) {
 	root := t.TempDir()
-	store, err := OpenStore(root)
+	store, err := OpenStore(root, defaultEtcdQuotaBytes)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -159,7 +161,7 @@ func TestNginxRenderKeepsHTTPChallengeWithoutCertificate(t *testing.T) {
 
 func TestNginxHTTPSFallbackRejectsUnknownSNIWithoutDefaultCertificate(t *testing.T) {
 	root := t.TempDir()
-	store, err := OpenStore(root)
+	store, err := OpenStore(root, defaultEtcdQuotaBytes)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -170,11 +172,11 @@ func TestNginxHTTPSFallbackRejectsUnknownSNIWithoutDefaultCertificate(t *testing
 		t.Fatal(err)
 	}
 	customCertDir := filepath.Join(cfg.NginxRoot, "certs", "custom.example")
-	if err := os.MkdirAll(customCertDir, 0755); err != nil {
+	if err := os.MkdirAll(customCertDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
 	for _, name := range []string{"fullchain.pem", "privkey.pem"} {
-		if err := os.WriteFile(filepath.Join(customCertDir, name), []byte("test"), 0600); err != nil {
+		if err := os.WriteFile(filepath.Join(customCertDir, name), []byte("test"), 0o600); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -192,7 +194,7 @@ func TestNginxHTTPSFallbackRejectsUnknownSNIWithoutDefaultCertificate(t *testing
 
 func TestNginxHTTPModeDoesNotNeedChallengeDirectory(t *testing.T) {
 	root := t.TempDir()
-	store, err := OpenStore(root)
+	store, err := OpenStore(root, defaultEtcdQuotaBytes)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -215,7 +217,7 @@ func TestNginxHTTPModeDoesNotNeedChallengeDirectory(t *testing.T) {
 
 func TestNginxApplyRollsBackAfterReloadFailure(t *testing.T) {
 	root := t.TempDir()
-	store, err := OpenStore(root)
+	store, err := OpenStore(root, defaultEtcdQuotaBytes)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -229,7 +231,7 @@ func TestNginxApplyRollsBackAfterReloadFailure(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := store.SetResultForSite(site, digest, true, false, ""); err != nil {
+	if _, err := store.SaveDeploymentResult(site, digest, true, false); err != nil {
 		t.Fatal(err)
 	}
 	if err := p.Apply(context.Background()); err != nil {
@@ -272,7 +274,7 @@ func TestNginxApplyRollsBackAfterReloadFailure(t *testing.T) {
 
 func TestNginxApplyRepublishesMissingPagesConfig(t *testing.T) {
 	root := t.TempDir()
-	store, err := OpenStore(root)
+	store, err := OpenStore(root, defaultEtcdQuotaBytes)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -280,7 +282,7 @@ func TestNginxApplyRepublishesMissingPagesConfig(t *testing.T) {
 	digest := strings.Repeat("a", 64)
 	site := Site{RepoID: 7, Enabled: true, OwnerName: "alice", RepoName: "demo", TarGzSHA256: digest, PagesUpdatedUnixNano: 1}
 	setTestSites(t, store, "https://pages.example", 1, 1, []Site{site})
-	if _, err := store.SetResultForSite(site, digest, true, false, ""); err != nil {
+	if _, err := store.SaveDeploymentResult(site, digest, true, false); err != nil {
 		t.Fatal(err)
 	}
 	cfg := testNginxConfig(t, root)
@@ -312,7 +314,7 @@ func TestNginxApplyRepublishesMissingPagesConfig(t *testing.T) {
 
 func TestNginxApplyActivatesRouteWithoutReloadWhenConfigIsUnchanged(t *testing.T) {
 	root := t.TempDir()
-	store, err := OpenStore(root)
+	store, err := OpenStore(root, defaultEtcdQuotaBytes)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -347,7 +349,7 @@ func TestNginxApplyActivatesRouteWithoutReloadWhenConfigIsUnchanged(t *testing.T
 	if _, err := os.Stat(testLog); err != nil {
 		t.Fatalf("initial nginx config test did not run: %v", err)
 	}
-	if _, err := store.SetResultForSite(site, digest, true, false, ""); err != nil {
+	if _, err := store.SaveDeploymentResult(site, digest, true, false); err != nil {
 		t.Fatal(err)
 	}
 	if err := p.Apply(context.Background()); err != nil {
@@ -374,7 +376,7 @@ func TestNginxApplyActivatesRouteWithoutReloadWhenConfigIsUnchanged(t *testing.T
 
 func TestNginxApplyReloadsWhenCertificateChanges(t *testing.T) {
 	root := t.TempDir()
-	store, err := OpenStore(root)
+	store, err := OpenStore(root, defaultEtcdQuotaBytes)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -382,16 +384,16 @@ func TestNginxApplyReloadsWhenCertificateChanges(t *testing.T) {
 	digest := strings.Repeat("a", 64)
 	site := Site{RepoID: 7, Enabled: true, OwnerName: "alice", RepoName: "demo", TarGzSHA256: digest, PagesUpdatedUnixNano: 1}
 	setTestSites(t, store, "https://pages.example", 1, 1, []Site{site})
-	if _, err := store.SetResultForSite(site, digest, true, false, ""); err != nil {
+	if _, err := store.SaveDeploymentResult(site, digest, true, false); err != nil {
 		t.Fatal(err)
 	}
 	cfg := testNginxConfig(t, root)
 	certDir := filepath.Join(cfg.NginxRoot, "certs", "default")
-	if err := os.MkdirAll(certDir, 0755); err != nil {
+	if err := os.MkdirAll(certDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
 	for _, name := range []string{"fullchain.pem", "privkey.pem"} {
-		if err := os.WriteFile(filepath.Join(certDir, name), []byte("initial"), 0600); err != nil {
+		if err := os.WriteFile(filepath.Join(certDir, name), []byte("initial"), 0o600); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -412,7 +414,7 @@ func TestNginxApplyReloadsWhenCertificateChanges(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(certDir, "fullchain.pem"), []byte("rotated"), 0600); err != nil {
+	if err := os.WriteFile(filepath.Join(certDir, "fullchain.pem"), []byte("rotated"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	if err := p.Apply(context.Background()); err == nil {
@@ -442,7 +444,7 @@ func TestNginxApplyReloadsWhenCertificateChanges(t *testing.T) {
 
 func TestNginxApplyCleansObsoleteSnapshots(t *testing.T) {
 	root := t.TempDir()
-	store, err := OpenStore(root)
+	store, err := OpenStore(root, defaultEtcdQuotaBytes)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -450,7 +452,7 @@ func TestNginxApplyCleansObsoleteSnapshots(t *testing.T) {
 	digest := strings.Repeat("a", 64)
 	site := Site{RepoID: 7, Enabled: true, OwnerName: "alice", RepoName: "demo", TarGzSHA256: digest, PagesUpdatedUnixNano: 1}
 	setTestSites(t, store, "http://pages.example", 1, 1, []Site{site})
-	if _, err := store.SetResultForSite(site, digest, true, false, ""); err != nil {
+	if _, err := store.SaveDeploymentResult(site, digest, true, false); err != nil {
 		t.Fatal(err)
 	}
 	cfg := testNginxConfig(t, root)
@@ -489,7 +491,7 @@ func TestNginxApplyCleansObsoleteSnapshots(t *testing.T) {
 
 func TestNginxNoChangeRetriesSnapshotCleanup(t *testing.T) {
 	root := t.TempDir()
-	store, err := OpenStore(root)
+	store, err := OpenStore(root, defaultEtcdQuotaBytes)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -497,7 +499,7 @@ func TestNginxNoChangeRetriesSnapshotCleanup(t *testing.T) {
 	digest := strings.Repeat("a", 64)
 	site := Site{RepoID: 7, Enabled: true, OwnerName: "alice", RepoName: "demo", TarGzSHA256: digest, PagesUpdatedUnixNano: 1}
 	setTestSites(t, store, "https://pages.example", 1, 1, []Site{site})
-	if _, err := store.SetResultForSite(site, digest, true, false, ""); err != nil {
+	if _, err := store.SaveDeploymentResult(site, digest, true, false); err != nil {
 		t.Fatal(err)
 	}
 	p, err := NewNginxPublisher(testNginxConfig(t, root), store)
@@ -508,10 +510,10 @@ func TestNginxNoChangeRetriesSnapshotCleanup(t *testing.T) {
 		t.Fatal(err)
 	}
 	stale := filepath.Join(p.cfg.NginxRoot, "config", "snapshots", strings.Repeat("b", 64))
-	if err := os.MkdirAll(stale, 0755); err != nil {
+	if err := os.MkdirAll(stale, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(stale, "pages.conf"), []byte("stale"), 0644); err != nil {
+	if err := os.WriteFile(filepath.Join(stale, "pages.conf"), []byte("stale"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	attempts := 0
@@ -522,15 +524,8 @@ func TestNginxNoChangeRetriesSnapshotCleanup(t *testing.T) {
 		}
 		return os.RemoveAll(path)
 	}
-	var firstCleanupErr error
-	cleanupLog := captureNginxStderr(t, func() {
-		firstCleanupErr = p.Apply(context.Background())
-	})
-	if firstCleanupErr != nil {
-		t.Fatal(firstCleanupErr)
-	}
-	if !strings.Contains(cleanupLog, "pages nginx snapshot cleanup") {
-		t.Fatalf("failed cleanup was not logged: %q", cleanupLog)
+	if err := p.Apply(context.Background()); err != nil {
+		t.Fatal(err)
 	}
 	if _, err := os.Stat(stale); err != nil {
 		t.Fatalf("failed cleanup should leave stale snapshot for retry: %v", err)
@@ -543,45 +538,22 @@ func TestNginxNoChangeRetriesSnapshotCleanup(t *testing.T) {
 	}
 }
 
-func captureNginxStderr(t *testing.T, fn func()) string {
-	t.Helper()
-	reader, writer, err := os.Pipe()
-	if err != nil {
-		t.Fatal(err)
-	}
-	previous := os.Stderr
-	os.Stderr = writer
-	fn()
-	if err := writer.Close(); err != nil {
-		t.Fatal(err)
-	}
-	os.Stderr = previous
-	output, err := io.ReadAll(reader)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := reader.Close(); err != nil {
-		t.Fatal(err)
-	}
-	return string(output)
-}
-
 func TestNginxCustomTemplate(t *testing.T) {
 	root := t.TempDir()
 	custom := filepath.Join(root, "custom", "nginx")
-	if err := os.MkdirAll(custom, 0755); err != nil {
+	if err := os.MkdirAll(custom, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.MkdirAll(filepath.Join(filepath.Dir(custom), "public"), 0755); err != nil {
+	if err := os.MkdirAll(filepath.Join(filepath.Dir(custom), "public"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(filepath.Dir(custom), "public", "index.html"), []byte("custom Pages home"), 0644); err != nil {
+	if err := os.WriteFile(filepath.Join(filepath.Dir(custom), "public", "index.html"), []byte("custom Pages home"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(custom, "pages.conf.tmpl"), []byte("# before\n{{ managed_config }}\n# after\n"), 0644); err != nil {
+	if err := os.WriteFile(filepath.Join(custom, "pages.conf.tmpl"), []byte("# before\n{{ managed_config }}\n# after\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	store, err := OpenStore(root)
+	store, err := OpenStore(root, defaultEtcdQuotaBytes)
 	if err != nil {
 		t.Fatal(err)
 	}

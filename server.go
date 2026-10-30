@@ -1,9 +1,10 @@
+// Copyright 2026 The Gitea Authors. All rights reserved.
+// SPDX-License-Identifier: MIT
+
 package page
 
 import (
 	"errors"
-	"fmt"
-	"math/big"
 	"net"
 	"net/http"
 	"net/url"
@@ -15,13 +16,13 @@ import (
 	"time"
 )
 
+// Server serves the active local sites in standalone mode.
 type Server struct {
 	store       *Store
 	root        *url.URL
-	secure      bool
-	challengeMu *sync.RWMutex
+	challengeMu sync.RWMutex
 	challenges  map[string]string
-	routeIndex  *routeIndex
+	routeIndex  routeIndex
 	resources   platformResources
 }
 
@@ -37,10 +38,6 @@ type routeEntry struct {
 	base string
 }
 
-func (s *Server) WithHTTPS() *Server {
-	return &Server{store: s.store, root: s.root, secure: true, challengeMu: s.challengeMu, challenges: s.challenges, routeIndex: s.routeIndex, resources: s.resources}
-}
-
 func (s *Server) SetChallenge(host, token, keyAuthorization string) {
 	s.challengeMu.Lock()
 	s.challenges[normalizeHost(host)+"/"+token] = keyAuthorization
@@ -53,17 +50,35 @@ func (s *Server) ClearChallenge(host, token string) {
 	s.challengeMu.Unlock()
 }
 
+// NewServer builds a standalone server from the current store and resources.
 func NewServer(store *Store, root *url.URL, customRoot string) (*Server, error) {
 	resources, err := loadPlatformResources(customRoot)
 	if err != nil {
 		return nil, err
 	}
-	s := &Server{store: store, root: root, challengeMu: &sync.RWMutex{}, challenges: make(map[string]string), routeIndex: &routeIndex{routes: make(map[string]routeEntry), byRepo: make(map[int64][]string), byHost: make(map[string]int)}, resources: resources}
+	s := &Server{
+		store:      store,
+		root:       root,
+		challenges: make(map[string]string),
+		routeIndex: routeIndex{
+			routes: make(map[string]routeEntry),
+			byRepo: make(map[int64][]string),
+			byHost: make(map[string]int),
+		},
+		resources: resources,
+	}
 	s.RebuildRoutes()
 	return s, nil
 }
 
-func (s *Server) Handler() http.Handler { return http.HandlerFunc(s.serveHTTP) }
+// Handler returns a request handler for one listener. The secure flag records
+// whether that listener already terminated TLS, while both handlers share the
+// same route and challenge state.
+func (s *Server) Handler(secure bool) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		s.serveHTTP(w, r, secure)
+	})
+}
 
 // RebuildRoutes creates the request-time index from the persisted state. It is
 // intentionally rebuilt after synchronization or deployment changes, rather
@@ -93,8 +108,8 @@ func (s *Server) RebuildRoutes() {
 // large instance therefore does not rebuild every unrelated route when one
 // repository changes or finishes deployment.
 func (s *Server) UpdateSite(repoID int64) {
-	local, ok := s.store.Get(repoID)
-	_, initialized, rootURL, _ := s.store.State()
+	local, ok := s.store.GetSite(repoID)
+	_, initialized, rootURL, _ := s.store.SyncState()
 	s.routeIndex.mu.Lock()
 	defer s.routeIndex.mu.Unlock()
 	for _, key := range s.routeIndex.byRepo[repoID] {
@@ -123,19 +138,13 @@ func (s *Server) siteRoutes(v LocalSite) map[string]routeEntry {
 	if v.Site.Deleted || !v.Site.Enabled || v.InstalledDigest == "" {
 		return nil
 	}
-	routes := make(map[string]routeEntry, 1+len(v.Site.CustomDomains))
-	for _, d := range v.Site.CustomDomains {
-		if d.State == "active" && v.CustomPublished {
-			routes[routeKey(normalizeHost(d.Host), "/")] = routeEntry{site: v, base: "/"}
-		}
+	routes := make(map[string]routeEntry, 2)
+	if v.Site.CustomDomain != nil && v.CustomPublished {
+		routes[routeKey(normalizeHost(v.Site.CustomDomain.Host), "/")] = routeEntry{site: v, base: "/"}
 	}
 	if v.DefaultPublished {
-		host := ownerHost(v.Site.OwnerName, s.root.Hostname())
-		if host != "" {
-			base := "/"
-			if !strings.EqualFold(v.Site.RepoName, ".pages") {
-				base = "/" + url.PathEscape(strings.ToLower(v.Site.RepoName)) + "/"
-			}
+		host, base, ok := defaultSiteRoute(v.Site, s.root.Hostname())
+		if ok {
 			routes[routeKey(host, base)] = routeEntry{site: v, base: base}
 		}
 	}
@@ -152,36 +161,21 @@ func routeHost(key string) string {
 func (s *Server) lookupRoute(host, requestPath string) (LocalSite, string, bool) {
 	s.routeIndex.mu.RLock()
 	defer s.routeIndex.mu.RUnlock()
-	if v, ok := s.routeIndex.routes[routeKey(host, "/")]; ok {
-		// A custom domain and an owner homepage both use the root route. A
-		// project route below is more specific and is checked first.
-		if strings.HasPrefix(requestPath, "/") {
-			segment := strings.TrimPrefix(requestPath, "/")
-			if i := strings.IndexByte(segment, '/'); i >= 0 {
-				segment = segment[:i]
-			}
-			if segment != "" {
-				base := "/" + url.PathEscape(strings.ToLower(segment)) + "/"
-				if project, exists := s.routeIndex.routes[routeKey(host, base)]; exists {
-					return project.site, project.base, true
-				}
-			}
-		}
-		return v.site, v.base, true
-	}
 	segment := strings.TrimPrefix(requestPath, "/")
 	if i := strings.IndexByte(segment, '/'); i >= 0 {
 		segment = segment[:i]
 	}
-	if segment == "" {
-		return LocalSite{}, "", false
+	if segment != "" {
+		base := "/" + url.PathEscape(strings.ToLower(segment)) + "/"
+		if project, ok := s.routeIndex.routes[routeKey(host, base)]; ok {
+			return project.site, project.base, true
+		}
 	}
-	base := "/" + url.PathEscape(strings.ToLower(segment)) + "/"
-	v, ok := s.routeIndex.routes[routeKey(host, base)]
-	return v.site, v.base, ok
+	root, ok := s.routeIndex.routes[routeKey(host, "/")]
+	return root.site, root.base, ok
 }
 
-func (s *Server) serveHTTP(w http.ResponseWriter, r *http.Request) {
+func (s *Server) serveHTTP(w http.ResponseWriter, r *http.Request, secure bool) {
 	if r.Method != http.MethodGet && r.Method != http.MethodHead {
 		w.Header().Set("Allow", "GET, HEAD")
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -191,7 +185,7 @@ func (s *Server) serveHTTP(w http.ResponseWriter, r *http.Request) {
 	if h, _, err := net.SplitHostPort(host); err == nil {
 		host = h
 	}
-	if s.root.Scheme == "https" && !s.secure && !strings.HasPrefix(r.URL.Path, "/.well-known/acme-challenge/") && s.knownHost(host) {
+	if s.root.Scheme == "https" && !secure && !strings.HasPrefix(r.URL.Path, "/.well-known/acme-challenge/") && s.knownHost(host) {
 		u := *r.URL
 		u.Scheme = "https"
 		u.Host = host
@@ -215,17 +209,17 @@ func (s *Server) serveHTTP(w http.ResponseWriter, r *http.Request) {
 			plainNotFound(w)
 			return
 		}
-		s.platform(w, r)
+		s.servePlatformRoute(w, r)
 		return
 	}
 	if host == normalizeHost(s.root.Hostname()) && r.URL.Path == "/" {
-		s.platformHome(w, r)
+		s.servePlatformFile(w, r, "index.html", http.StatusOK)
 		return
 	}
 	match, base, found := s.lookupRoute(host, r.URL.Path)
 	if !found {
 		if s.knownHost(host) {
-			s.platform(w, r)
+			s.servePlatformRoute(w, r)
 		} else {
 			plainNotFound(w)
 		}
@@ -256,13 +250,13 @@ func (s *Server) serveHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	currentRoot := filepath.Join(s.store.SiteDir(match.Site.RepoID), "current")
 	resolvedRoot, err := filepath.EvalSymlinks(currentRoot)
-	if err != nil || !within(resolvedRoot, s.store.SiteDir(match.Site.RepoID)) {
+	if err != nil || !pathWithin(resolvedRoot, s.store.SiteDir(match.Site.RepoID)) {
 		plainNotFound(w)
 		return
 	}
 	file := filepath.Join(currentRoot, filepath.FromSlash(path.Clean("/" + rel)[1:]))
 	resolvedFile, err := filepath.EvalSymlinks(file)
-	if err != nil || !within(resolvedFile, resolvedRoot) {
+	if err != nil || !pathWithin(resolvedFile, resolvedRoot) {
 		if err != nil && !errors.Is(err, os.ErrNotExist) {
 			http.Error(w, "service unavailable", http.StatusServiceUnavailable)
 		} else {
@@ -279,11 +273,7 @@ func (s *Server) serveHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
-	defer func() { _ = f.Close() }()
-	w.Header().Set("Cache-Control", "no-cache, must-revalidate")
-	w.Header().Set("X-Content-Type-Options", "nosniff")
-	w.Header().Set("Content-Type", siteContentType(filepath.Base(resolvedFile)))
-	http.ServeContent(w, r, filepath.Base(resolvedFile), time.Time{}, f)
+	serveLocalFile(w, r, f, resolvedFile, http.StatusOK)
 }
 
 func (s *Server) knownHost(host string) bool {
@@ -360,7 +350,7 @@ func normalizeHost(host string) string {
 
 func (s *Server) serveSiteNotFound(w http.ResponseWriter, r *http.Request, root string) {
 	resolved, err := filepath.EvalSymlinks(filepath.Join(root, "404.html"))
-	if err != nil || !within(resolved, root) {
+	if err != nil || !pathWithin(resolved, root) {
 		plainNotFound(w)
 		return
 	}
@@ -369,12 +359,18 @@ func (s *Server) serveSiteNotFound(w http.ResponseWriter, r *http.Request, root 
 		plainNotFound(w)
 		return
 	}
-	defer func() { _ = f.Close() }()
+	serveLocalFile(w, r, f, resolved, http.StatusNotFound)
+}
+
+func serveLocalFile(w http.ResponseWriter, r *http.Request, file *os.File, name string, status int) {
+	defer func() { _ = file.Close() }()
 	w.Header().Set("Cache-Control", "no-cache, must-revalidate")
 	w.Header().Set("X-Content-Type-Options", "nosniff")
-	w.Header().Set("Content-Type", siteContentType(filepath.Base(resolved)))
-	w.WriteHeader(http.StatusNotFound)
-	http.ServeContent(w, r, filepath.Base(resolved), time.Time{}, f)
+	w.Header().Set("Content-Type", siteContentType(filepath.Base(name)))
+	if status != http.StatusOK {
+		w.WriteHeader(status)
+	}
+	http.ServeContent(w, r, filepath.Base(name), time.Time{}, file)
 }
 
 func plainNotFound(w http.ResponseWriter) {
@@ -382,11 +378,7 @@ func plainNotFound(w http.ResponseWriter) {
 	http.Error(w, "404 Not Found", http.StatusNotFound)
 }
 
-func (s *Server) platformHome(w http.ResponseWriter, r *http.Request) {
-	s.servePlatformFile(w, r, "index.html", http.StatusOK)
-}
-
-func (s *Server) platform(w http.ResponseWriter, r *http.Request) {
+func (s *Server) servePlatformRoute(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-store")
 	if r.URL.Path == "/@gitea-pages/ready" {
 		w.WriteHeader(http.StatusNoContent)
@@ -419,48 +411,4 @@ func (s *Server) servePlatformFile(w http.ResponseWriter, r *http.Request, name 
 	if r.Method != http.MethodHead {
 		_, _ = w.Write(data)
 	}
-}
-
-func ownerHost(owner, root string) string {
-	label, err := ownerDNSLabel(strings.ToLower(owner))
-	if err != nil || root == "" {
-		return ""
-	}
-	return label + "." + normalizeHost(root)
-}
-
-const ownerAlphabet = "-._0123456789abcdefghijklmnopqrstuvwxyz"
-const ownerDirectAlphabet = "0123456789abcdefghijklmnopqrstuvwxyz-"
-
-func ownerDNSLabel(owner string) (string, error) {
-	if owner == "" || len(owner) > 40 {
-		return "", fmt.Errorf("invalid owner")
-	}
-	direct := !strings.HasPrefix(owner, "x-") && owner[0] != '-' && owner[len(owner)-1] != '-'
-	for i := 0; i < len(owner); i++ {
-		c := owner[i]
-		if !strings.ContainsRune(ownerAlphabet, rune(c)) {
-			return "", fmt.Errorf("invalid owner")
-		}
-		if !strings.ContainsRune(ownerDirectAlphabet, rune(c)) {
-			direct = false
-		}
-	}
-	if direct {
-		return owner, nil
-	}
-	number := new(big.Int)
-	forty := big.NewInt(40)
-	for i := 0; i < len(owner); i++ {
-		number.Mul(number, forty)
-		number.Add(number, big.NewInt(int64(strings.IndexByte(ownerAlphabet, owner[i])+1)))
-	}
-	return "x-" + number.Text(36), nil
-}
-
-func within(p, root string) bool {
-	p, _ = filepath.Abs(p)
-	root, _ = filepath.Abs(root)
-	rel, err := filepath.Rel(root, p)
-	return err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
 }

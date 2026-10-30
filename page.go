@@ -6,8 +6,10 @@ package page
 import (
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
+	"net/netip"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -16,6 +18,7 @@ import (
 	"time"
 )
 
+// Mode selects the built-in server or external Nginx publisher.
 type Mode string
 
 const (
@@ -23,6 +26,7 @@ const (
 	ModeNginx      Mode = "nginx"
 )
 
+// ParseMode validates a command mode.
 func ParseMode(value string) (Mode, error) {
 	mode := Mode(value)
 	switch mode {
@@ -55,6 +59,9 @@ type Config struct {
 	ACMEEABKID           string
 	ACMEEABKey           []byte
 	DNSProvider          string
+	DNSResolver          string
+	ACMEDNSResolver      string
+	DNSRefreshInterval   time.Duration
 	HTTP01ProbeAddresses []string
 	DNSPresentCommand    []string
 	DNSCleanupCommand    []string
@@ -68,97 +75,104 @@ type Config struct {
 	CustomRoot           string
 }
 
+// LoadConfig reads and validates the environment for one serving mode.
 func LoadConfig(mode Mode) (Config, error) {
 	var cfg Config
 	cfg.Mode = mode
 	var err error
-	cfg.GiteaURL, err = requiredURL("GITEA_PAGES_GITEA_URL", true)
+	cfg.GiteaURL, err = requiredURL("GITEA_PAGES_GITEA_URL")
 	if err != nil {
 		return cfg, err
 	}
-	cfg.RootURL, err = requiredURL("GITEA_PAGES_ROOT_URL", false)
+	cfg.RootURL, err = requiredURL("GITEA_PAGES_ROOT_URL")
 	if err != nil {
 		return cfg, err
 	}
 	if cfg.RootURL.Port() != "" {
-		return cfg, fmt.Errorf("GITEA_PAGES_ROOT_URL must use the standard HTTP or HTTPS port")
+		return cfg, errors.New("GITEA_PAGES_ROOT_URL must use the standard HTTP or HTTPS port")
 	}
 	cfg.Token = strings.TrimSpace(os.Getenv("GITEA_PAGES_TOKEN"))
 	if cfg.Token == "" {
-		return cfg, fmt.Errorf("GITEA_PAGES_TOKEN is required")
+		return cfg, errors.New("GITEA_PAGES_TOKEN is required")
 	}
 	cfg.DataRoot = strings.TrimSpace(os.Getenv("GITEA_PAGES_DATA_ROOT"))
 	if cfg.DataRoot == "" || !filepath.IsAbs(cfg.DataRoot) {
-		return cfg, fmt.Errorf("GITEA_PAGES_DATA_ROOT must be an absolute path")
+		return cfg, errors.New("GITEA_PAGES_DATA_ROOT must be an absolute path")
 	}
 	cfg.SyncInterval, err = envDuration("GITEA_PAGES_SYNC_INTERVAL", time.Minute)
 	if err != nil {
 		return cfg, err
 	}
 	if cfg.SyncInterval < time.Minute {
-		return cfg, fmt.Errorf("GITEA_PAGES_SYNC_INTERVAL must be at least 1m")
+		return cfg, errors.New("GITEA_PAGES_SYNC_INTERVAL must be at least 1m")
 	}
 	cfg.DeployTimeout, err = envDuration("GITEA_PAGES_DEPLOY_TIMEOUT", 10*time.Minute)
 	if err != nil {
 		return cfg, err
 	}
 	cfg.DeployQueueSize, err = envInt("GITEA_PAGES_DEPLOY_QUEUE_SIZE", 32)
-	if err != nil || cfg.DeployQueueSize < 1 {
-		return cfg, fmt.Errorf("GITEA_PAGES_DEPLOY_QUEUE_SIZE must be positive")
+	if err != nil {
+		return cfg, err
+	}
+	if cfg.DeployQueueSize < 1 {
+		return cfg, errors.New("GITEA_PAGES_DEPLOY_QUEUE_SIZE must be positive")
 	}
 	cfg.DeployConcurrency, err = envInt("GITEA_PAGES_DEPLOY_CONCURRENCY", 2)
-	if err != nil || cfg.DeployConcurrency < 1 {
-		return cfg, fmt.Errorf("GITEA_PAGES_DEPLOY_CONCURRENCY must be positive")
+	if err != nil {
+		return cfg, err
 	}
-	cfg.EtcdQuotaBytes = 2 * 1024 * 1024 * 1024
+	if cfg.DeployConcurrency < 1 {
+		return cfg, errors.New("GITEA_PAGES_DEPLOY_CONCURRENCY must be positive")
+	}
+	cfg.EtcdQuotaBytes = defaultEtcdQuotaBytes
 	if raw := strings.TrimSpace(os.Getenv("GITEA_PAGES_ETCD_QUOTA_BYTES")); raw != "" {
 		cfg.EtcdQuotaBytes, err = strconv.ParseInt(raw, 10, 64)
 		if err != nil || cfg.EtcdQuotaBytes < 64*1024*1024 {
-			return cfg, fmt.Errorf("GITEA_PAGES_ETCD_QUOTA_BYTES must be at least 67108864")
+			return cfg, errors.New("GITEA_PAGES_ETCD_QUOTA_BYTES must be at least 67108864")
 		}
 	}
 	cfg.CustomRoot = strings.TrimSpace(os.Getenv("GITEA_PAGES_CUSTOM_ROOT"))
 	if cfg.CustomRoot != "" {
 		if !filepath.IsAbs(cfg.CustomRoot) {
-			return cfg, fmt.Errorf("GITEA_PAGES_CUSTOM_ROOT must be an absolute path")
+			return cfg, errors.New("GITEA_PAGES_CUSTOM_ROOT must be an absolute path")
 		}
 		entry, lstatErr := os.Lstat(cfg.CustomRoot)
 		if lstatErr != nil {
 			return cfg, fmt.Errorf("GITEA_PAGES_CUSTOM_ROOT: %w", lstatErr)
 		}
 		if entry.Mode()&os.ModeSymlink != 0 {
-			return cfg, fmt.Errorf("GITEA_PAGES_CUSTOM_ROOT must not be a symbolic link")
+			return cfg, errors.New("GITEA_PAGES_CUSTOM_ROOT must not be a symbolic link")
 		}
 		info, statErr := os.Stat(cfg.CustomRoot)
 		if statErr != nil {
 			return cfg, fmt.Errorf("GITEA_PAGES_CUSTOM_ROOT: %w", statErr)
 		}
 		if !info.IsDir() {
-			return cfg, fmt.Errorf("GITEA_PAGES_CUSTOM_ROOT must be a directory")
+			return cfg, errors.New("GITEA_PAGES_CUSTOM_ROOT must be a directory")
 		}
 	}
 	if mode == ModeStandalone {
 		cfg.HTTPListen = strings.TrimSpace(os.Getenv("GITEA_PAGES_HTTP_LISTEN"))
 		if cfg.HTTPListen == "" {
-			return cfg, fmt.Errorf("GITEA_PAGES_HTTP_LISTEN is required for standalone mode")
+			return cfg, errors.New("GITEA_PAGES_HTTP_LISTEN is required for standalone mode")
 		}
 		if cfg.RootURL.Scheme == "https" {
 			cfg.HTTPSListen = strings.TrimSpace(os.Getenv("GITEA_PAGES_HTTPS_LISTEN"))
 			if cfg.HTTPSListen == "" {
-				return cfg, fmt.Errorf("GITEA_PAGES_HTTPS_LISTEN is required for an https standalone instance")
+				return cfg, errors.New("GITEA_PAGES_HTTPS_LISTEN is required for an https standalone instance")
 			}
 		}
 	} else {
 		cfg.NginxRoot = strings.TrimSpace(os.Getenv("GITEA_PAGES_NGINX_ROOT"))
 		if cfg.NginxRoot == "" || !filepath.IsAbs(cfg.NginxRoot) {
-			return cfg, fmt.Errorf("GITEA_PAGES_NGINX_ROOT must be an absolute path")
+			return cfg, errors.New("GITEA_PAGES_NGINX_ROOT must be an absolute path")
 		}
 		cfg.NginxHTTP01Root = strings.TrimSpace(os.Getenv("GITEA_PAGES_NGINX_HTTP01_ROOT"))
 		if cfg.RootURL.Scheme == "https" && (cfg.NginxHTTP01Root == "" || !filepath.IsAbs(cfg.NginxHTTP01Root)) {
-			return cfg, fmt.Errorf("GITEA_PAGES_NGINX_HTTP01_ROOT must be an absolute path for HTTPS")
+			return cfg, errors.New("GITEA_PAGES_NGINX_HTTP01_ROOT must be an absolute path for HTTPS")
 		}
 		if cfg.NginxHTTP01Root != "" && !filepath.IsAbs(cfg.NginxHTTP01Root) {
-			return cfg, fmt.Errorf("GITEA_PAGES_NGINX_HTTP01_ROOT must be an absolute path")
+			return cfg, errors.New("GITEA_PAGES_NGINX_HTTP01_ROOT must be an absolute path")
 		}
 		cfg.NginxHTTPProbeAddr, err = requiredProbeAddress("GITEA_PAGES_NGINX_HTTP_PROBE_ADDR")
 		if err != nil {
@@ -185,57 +199,83 @@ func LoadConfig(mode Mode) (Config, error) {
 	}
 	cfg.CertRoot = strings.TrimSpace(os.Getenv("GITEA_PAGES_CERT_ROOT"))
 	if cfg.CertRoot != "" && !filepath.IsAbs(cfg.CertRoot) {
-		return cfg, fmt.Errorf("GITEA_PAGES_CERT_ROOT must be an absolute path")
+		return cfg, errors.New("GITEA_PAGES_CERT_ROOT must be an absolute path")
 	}
 	if cfg.CertRoot != "" && pathsOverlap(cfg.CertRoot, cfg.DataRoot) {
-		return cfg, fmt.Errorf("GITEA_PAGES_CERT_ROOT and GITEA_PAGES_DATA_ROOT must be separate directories")
+		return cfg, errors.New("GITEA_PAGES_CERT_ROOT and GITEA_PAGES_DATA_ROOT must be separate directories")
 	}
 	if mode == ModeNginx {
 		if pathsOverlap(cfg.NginxRoot, cfg.DataRoot) {
-			return cfg, fmt.Errorf("GITEA_PAGES_NGINX_ROOT and GITEA_PAGES_DATA_ROOT must be separate directories")
+			return cfg, errors.New("GITEA_PAGES_NGINX_ROOT and GITEA_PAGES_DATA_ROOT must be separate directories")
 		}
 		if cfg.CertRoot != "" && pathsOverlap(cfg.CertRoot, cfg.NginxRoot) {
-			return cfg, fmt.Errorf("GITEA_PAGES_CERT_ROOT and GITEA_PAGES_NGINX_ROOT must be separate directories")
+			return cfg, errors.New("GITEA_PAGES_CERT_ROOT and GITEA_PAGES_NGINX_ROOT must be separate directories")
 		}
 		if cfg.NginxHTTP01Root != "" && (pathsOverlap(cfg.NginxHTTP01Root, cfg.DataRoot) || pathsOverlap(cfg.NginxHTTP01Root, cfg.NginxRoot) || cfg.CertRoot != "" && pathsOverlap(cfg.NginxHTTP01Root, cfg.CertRoot)) {
-			return cfg, fmt.Errorf("GITEA_PAGES_NGINX_HTTP01_ROOT must be separate from other Pages directories")
+			return cfg, errors.New("GITEA_PAGES_NGINX_HTTP01_ROOT must be separate from other Pages directories")
 		}
 	}
 	if cfg.CustomRoot != "" {
-		for name, other := range map[string]string{
-			"GITEA_PAGES_DATA_ROOT":         cfg.DataRoot,
-			"GITEA_PAGES_NGINX_ROOT":        cfg.NginxRoot,
-			"GITEA_PAGES_NGINX_HTTP01_ROOT": cfg.NginxHTTP01Root,
-			"GITEA_PAGES_CERT_ROOT":         cfg.CertRoot,
+		for _, dir := range []struct {
+			name string
+			path string
+		}{
+			{"GITEA_PAGES_DATA_ROOT", cfg.DataRoot},
+			{"GITEA_PAGES_NGINX_ROOT", cfg.NginxRoot},
+			{"GITEA_PAGES_NGINX_HTTP01_ROOT", cfg.NginxHTTP01Root},
+			{"GITEA_PAGES_CERT_ROOT", cfg.CertRoot},
 		} {
-			if other != "" && pathsOverlap(cfg.CustomRoot, other) {
-				return cfg, fmt.Errorf("GITEA_PAGES_CUSTOM_ROOT overlaps %s", name)
+			if dir.path != "" && pathsOverlap(cfg.CustomRoot, dir.path) {
+				return cfg, fmt.Errorf("GITEA_PAGES_CUSTOM_ROOT overlaps %s", dir.name)
 			}
 		}
 	}
 	cfg.ACMEDirectoryURL = strings.TrimSpace(os.Getenv("GITEA_PAGES_ACME_DIRECTORY_URL"))
 	cfg.ACMEEmail = strings.TrimSpace(os.Getenv("GITEA_PAGES_ACME_EMAIL"))
 	if cfg.ACMEDirectoryURL != "" && cfg.ACMEEmail == "" {
-		return cfg, fmt.Errorf("GITEA_PAGES_ACME_EMAIL is required when ACME is enabled")
+		return cfg, errors.New("GITEA_PAGES_ACME_EMAIL is required when ACME is enabled")
 	}
 	cfg.ACMEEABKID = strings.TrimSpace(os.Getenv("GITEA_PAGES_ACME_EAB_KID"))
 	key := strings.TrimSpace(os.Getenv("GITEA_PAGES_ACME_EAB_HMAC_KEY"))
 	if (cfg.ACMEEABKID == "") != (key == "") {
-		return cfg, fmt.Errorf("GITEA_PAGES_ACME_EAB_KID and GITEA_PAGES_ACME_EAB_HMAC_KEY must be set together")
+		return cfg, errors.New("GITEA_PAGES_ACME_EAB_KID and GITEA_PAGES_ACME_EAB_HMAC_KEY must be set together")
 	}
 	if key != "" {
 		cfg.ACMEEABKey, err = base64.RawURLEncoding.DecodeString(strings.TrimRight(key, "="))
 		if err != nil || len(cfg.ACMEEABKey) < 16 {
-			return cfg, fmt.Errorf("GITEA_PAGES_ACME_EAB_HMAC_KEY must be a base64url HMAC key")
+			return cfg, errors.New("GITEA_PAGES_ACME_EAB_HMAC_KEY must be a base64url HMAC key")
 		}
 	}
 	if raw := strings.TrimSpace(os.Getenv("GITEA_PAGES_HTTP01_PROBE_ADDRESSES")); raw != "" {
 		for _, v := range strings.Split(raw, ",") {
 			v = strings.TrimSpace(v)
-			if v != "" {
-				cfg.HTTP01ProbeAddresses = append(cfg.HTTP01ProbeAddresses, v)
+			if v == "" {
+				return cfg, errors.New("GITEA_PAGES_HTTP01_PROBE_ADDRESSES contains an empty address")
 			}
+			address, err := parseProbeAddress("GITEA_PAGES_HTTP01_PROBE_ADDRESSES", v)
+			if err != nil {
+				return cfg, err
+			}
+			cfg.HTTP01ProbeAddresses = append(cfg.HTTP01ProbeAddresses, address)
 		}
+	}
+	cfg.DNSResolver, err = optionalDNSResolver("GITEA_PAGES_DNS_RESOLVER")
+	if err != nil {
+		return cfg, err
+	}
+	cfg.ACMEDNSResolver, err = optionalDNSResolver("GITEA_PAGES_ACME_DNS_RESOLVER")
+	if err != nil {
+		return cfg, err
+	}
+	if cfg.ACMEDNSResolver == "" {
+		cfg.ACMEDNSResolver = cfg.DNSResolver
+	}
+	cfg.DNSRefreshInterval, err = envDuration("GITEA_PAGES_DNS_REFRESH_INTERVAL", 15*time.Minute)
+	if err != nil {
+		return cfg, err
+	}
+	if cfg.DNSRefreshInterval < time.Minute || cfg.DNSRefreshInterval > 24*time.Hour {
+		return cfg, errors.New("GITEA_PAGES_DNS_REFRESH_INTERVAL must be between 1m and 24h")
 	}
 	presentRaw, cleanupRaw := strings.TrimSpace(os.Getenv("GITEA_PAGES_DNS_PRESENT_COMMAND")), strings.TrimSpace(os.Getenv("GITEA_PAGES_DNS_CLEANUP_COMMAND"))
 	cfg.DNSProvider = strings.TrimSpace(os.Getenv("GITEA_PAGES_DNS_PROVIDER"))
@@ -243,7 +283,7 @@ func LoadConfig(mode Mode) (Config, error) {
 		cfg.DNSProvider = "command"
 	}
 	if (presentRaw == "") != (cleanupRaw == "") {
-		return cfg, fmt.Errorf("DNS present and cleanup commands must be configured together")
+		return cfg, errors.New("DNS present and cleanup commands must be configured together")
 	}
 	if presentRaw != "" {
 		cfg.DNSPresentCommand, err = envCommand("GITEA_PAGES_DNS_PRESENT_COMMAND", false)
@@ -275,16 +315,42 @@ func LoadConfig(mode Mode) (Config, error) {
 	return cfg, nil
 }
 
-func requiredProbeAddress(name string) (string, error) {
+func optionalDNSResolver(name string) (string, error) {
 	value := strings.TrimSpace(os.Getenv(name))
-	host, port, err := net.SplitHostPort(value)
-	if err != nil || net.ParseIP(host) == nil || port == "" {
-		return "", fmt.Errorf("%s must be a local IP:port address", name)
+	if value == "" {
+		return "", nil
 	}
-	if parsed, parseErr := strconv.ParseUint(port, 10, 16); parseErr != nil || parsed == 0 {
+	if address, err := netip.ParseAddr(value); err == nil {
+		return net.JoinHostPort(address.String(), "53"), nil
+	}
+	host, port, err := net.SplitHostPort(value)
+	if err != nil {
+		return "", fmt.Errorf("%s must be an IP address with an optional numeric port", name)
+	}
+	address, err := netip.ParseAddr(host)
+	if err != nil {
+		return "", fmt.Errorf("%s must use an IP address", name)
+	}
+	parsedPort, err := strconv.ParseUint(port, 10, 16)
+	if err != nil || parsedPort == 0 {
+		return "", fmt.Errorf("%s must use a port between 1 and 65535", name)
+	}
+	return net.JoinHostPort(address.String(), strconv.FormatUint(parsedPort, 10)), nil
+}
+
+func requiredProbeAddress(name string) (string, error) {
+	return parseProbeAddress(name, strings.TrimSpace(os.Getenv(name)))
+}
+
+func parseProbeAddress(name, value string) (string, error) {
+	address, err := netip.ParseAddrPort(value)
+	if err != nil {
+		return "", fmt.Errorf("%s must be an IP:port address", name)
+	}
+	if address.Port() == 0 {
 		return "", fmt.Errorf("%s must include a nonzero TCP port", name)
 	}
-	return value, nil
+	return address.String(), nil
 }
 
 func envCommand(name string, requireCandidatePlaceholder bool) ([]string, error) {
@@ -306,7 +372,7 @@ func envCommand(name string, requireCandidatePlaceholder bool) ([]string, error)
 	return cmd, nil
 }
 
-func requiredURL(name string, httpsOnly bool) (*url.URL, error) {
+func requiredURL(name string) (*url.URL, error) {
 	raw := strings.TrimSpace(os.Getenv(name))
 	if raw == "" {
 		return nil, fmt.Errorf("%s is required", name)
@@ -314,9 +380,6 @@ func requiredURL(name string, httpsOnly bool) (*url.URL, error) {
 	u, err := url.Parse(raw)
 	if err != nil || u.Scheme == "" || u.Host == "" || u.User != nil || u.Path != "" || u.RawQuery != "" || u.Fragment != "" {
 		return nil, fmt.Errorf("%s must be an absolute URL without path, query, fragment, or user info", name)
-	}
-	if httpsOnly && u.Scheme != "https" {
-		return nil, fmt.Errorf("%s must use https", name)
 	}
 	if u.Scheme != "http" && u.Scheme != "https" {
 		return nil, fmt.Errorf("%s must use http or https", name)
@@ -329,18 +392,8 @@ func requiredURL(name string, httpsOnly bool) (*url.URL, error) {
 	return u, nil
 }
 
-func withinPath(p, root string) bool {
-	rel, err := filepath.Rel(root, p)
-	return err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
-}
-
 func pathsOverlap(a, b string) bool {
-	aa, errA := filepath.Abs(filepath.Clean(a))
-	bb, errB := filepath.Abs(filepath.Clean(b))
-	if errA != nil || errB != nil {
-		return false
-	}
-	return withinPath(aa, bb) || withinPath(bb, aa)
+	return pathWithin(a, b) || pathWithin(b, a)
 }
 
 func envDuration(name string, fallback time.Duration) (time.Duration, error) {

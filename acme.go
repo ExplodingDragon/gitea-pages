@@ -1,3 +1,6 @@
+// Copyright 2026 The Gitea Authors. All rights reserved.
+// SPDX-License-Identifier: MIT
+
 package page
 
 import (
@@ -28,16 +31,19 @@ import (
 	"github.com/go-acme/lego/v5/registration"
 )
 
+// DNS01Provider manages the DNS records requested by lego.
 type DNS01Provider interface {
 	Present(context.Context, string, string) error
 	Cleanup(context.Context, string, string) error
 }
 
+// ChallengeResponder exposes HTTP-01 tokens through the active serving mode.
 type ChallengeResponder interface {
 	SetChallenge(string, string, string)
 	ClearChallenge(string, string)
 }
 
+// CommandDNSProvider delegates DNS record changes to operator-provided commands.
 type CommandDNSProvider struct{ PresentCommand, CleanupCommand []string }
 
 // NewDNS01Provider keeps provider credentials outside the Pages state. The
@@ -47,7 +53,7 @@ func NewDNS01Provider(name string, present, cleanup []string) (DNS01Provider, er
 	switch strings.ToLower(strings.TrimSpace(name)) {
 	case "", "command":
 		if len(present) == 0 || len(cleanup) == 0 {
-			return nil, fmt.Errorf("DNS command provider requires present and cleanup commands")
+			return nil, errors.New("DNS command provider requires present and cleanup commands")
 		}
 		return CommandDNSProvider{PresentCommand: present, CleanupCommand: cleanup}, nil
 	default:
@@ -65,7 +71,7 @@ func (p CommandDNSProvider) Cleanup(ctx context.Context, name, value string) err
 
 func runDNSCommand(ctx context.Context, command []string, name, value string) error {
 	if len(command) == 0 {
-		return fmt.Errorf("DNS provider command is not configured")
+		return errors.New("DNS provider command is not configured")
 	}
 	args := make([]string, len(command))
 	for i, v := range command {
@@ -74,6 +80,7 @@ func runDNSCommand(ctx context.Context, command []string, name, value string) er
 	return exec.CommandContext(ctx, args[0], args[1:]...).Run()
 }
 
+// ACMEManager owns the persisted lego account and certificate requests.
 type ACMEManager struct {
 	store                  *Store
 	directory, email       string
@@ -115,10 +122,16 @@ func (u *acmeUser) GetEmail() string                           { return u.email 
 func (u *acmeUser) GetPrivateKey() crypto.Signer               { return u.key }
 func (u *acmeUser) GetRegistration() *legoacme.ExtendedAccount { return u.reg }
 
-func NewACMEManager(store *Store, directory, email string) (*ACMEManager, error) {
+// NewACMEManager restores or creates the lego account stored in embedded etcd.
+func NewACMEManager(store *Store, directory, email, dnsResolver string) (*ACMEManager, error) {
+	dnsOptions := dns01.NewOptions()
+	if dnsResolver != "" {
+		dnsOptions.RecursiveNameservers = []string{dnsResolver}
+	}
+	dns01.SetDefaultClient(dns01.NewClient(dnsOptions))
 	m := &ACMEManager{store: store, directory: strings.TrimSpace(directory), email: strings.TrimSpace(email)}
 	if m.directory == "" {
-		return nil, fmt.Errorf("ACME directory is required")
+		return nil, errors.New("ACME directory is required")
 	}
 	var state acmeAccountState
 	ok, err := store.kv.Get(context.Background(), "/gitea-pages/acme/account", &state)
@@ -129,7 +142,7 @@ func NewACMEManager(store *Store, directory, email string) (*ACMEManager, error)
 		m.accountPEM = state.KeyPEM
 		block, _ := pem.Decode([]byte(state.KeyPEM))
 		if block == nil {
-			return nil, fmt.Errorf("ACME account key is invalid")
+			return nil, errors.New("ACME account key is invalid")
 		}
 		key, err := x509.ParseECPrivateKey(block.Bytes)
 		if err != nil {
@@ -183,7 +196,7 @@ func (m *ACMEManager) ensureAccount(ctx context.Context, c *lego.Client) error {
 		return err
 	}
 	if account == nil || account.Location == "" {
-		return fmt.Errorf("ACME server returned no account location")
+		return errors.New("ACME server returned no account location")
 	}
 	m.accountURI = account.Location
 	if err := m.store.kv.Put(ctx, "/gitea-pages/acme/account", acmeAccountState{KeyPEM: m.accountPEM, URI: m.accountURI}); err != nil {
@@ -286,7 +299,7 @@ func randomChallengeToken() (string, error) {
 
 func (m *ACMEManager) IssueHTTP01(ctx context.Context, host string, server ChallengeResponder, addresses []string) (CertificateRecord, error) {
 	if server == nil {
-		return CertificateRecord{}, fmt.Errorf("HTTP-01 challenge responder is not configured")
+		return CertificateRecord{}, errors.New("HTTP-01 challenge responder is not configured")
 	}
 	token, err := randomChallengeToken()
 	if err != nil {
@@ -312,10 +325,10 @@ func (m *ACMEManager) IssueHTTP01(ctx context.Context, host string, server Chall
 
 func (m *ACMEManager) IssueDNS01(ctx context.Context, names []string, provider DNS01Provider) (CertificateRecord, error) {
 	if provider == nil {
-		return CertificateRecord{}, fmt.Errorf("DNS-01 provider is not configured")
+		return CertificateRecord{}, errors.New("DNS-01 provider is not configured")
 	}
 	if len(names) == 0 {
-		return CertificateRecord{}, fmt.Errorf("DNS-01 names are empty")
+		return CertificateRecord{}, errors.New("DNS-01 names are empty")
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -383,7 +396,7 @@ func (m *ACMEManager) recordFailure(key string, state acmeRetryState, issueErr e
 func (m *ACMEManager) IssueDefaultDNS01(ctx context.Context, rootHost string, provider DNS01Provider) (CertificateRecord, error) {
 	rootHost = strings.ToLower(strings.TrimSuffix(strings.TrimSpace(rootHost), "."))
 	if rootHost == "" {
-		return CertificateRecord{}, fmt.Errorf("default Pages host is empty")
+		return CertificateRecord{}, errors.New("default Pages host is empty")
 	}
 	r, err := m.IssueDNS01(ctx, []string{rootHost, "*." + rootHost}, provider)
 	if err == nil {
@@ -420,12 +433,12 @@ func (m *ACMEManager) obtain(ctx context.Context, c *lego.Client, names []string
 
 func certificateRecordFromResource(resource *certificate.Resource, host string) (CertificateRecord, error) {
 	if resource == nil || len(resource.Certificate) == 0 || len(resource.PrivateKey) == 0 {
-		return CertificateRecord{}, fmt.Errorf("ACME server returned an empty certificate")
+		return CertificateRecord{}, errors.New("ACME server returned an empty certificate")
 	}
 	record := CertificateRecord{Host: host, CertificatePEM: string(resource.Certificate), PrivateKeyPEM: string(resource.PrivateKey), Source: "acme"}
 	block, _ := pem.Decode(resource.Certificate)
 	if block == nil {
-		return CertificateRecord{}, fmt.Errorf("ACME server returned invalid certificate PEM")
+		return CertificateRecord{}, errors.New("ACME server returned invalid certificate PEM")
 	}
 	cert, err := x509.ParseCertificate(block.Bytes)
 	if err != nil {

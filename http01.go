@@ -1,7 +1,11 @@
+// Copyright 2026 The Gitea Authors. All rights reserved.
+// SPDX-License-Identifier: MIT
+
 package page
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -13,8 +17,8 @@ import (
 // HTTP01Precheck validates every resolved public address before an ACME order
 // is created. The request is pinned to addr while preserving the real Host.
 func HTTP01Precheck(ctx context.Context, host, token, keyAuthorization string, addresses []string) error {
-	if host == "" || !normalizeChallengeToken(token) || keyAuthorization == "" || len(addresses) == 0 {
-		return fmt.Errorf("incomplete HTTP-01 precheck")
+	if host == "" || !validChallengeToken(token) || keyAuthorization == "" || len(addresses) == 0 {
+		return errors.New("incomplete HTTP-01 precheck")
 	}
 	path := "/.well-known/acme-challenge/" + token
 	for _, addr := range addresses {
@@ -48,7 +52,7 @@ func HTTP01Precheck(ctx context.Context, host, token, keyAuthorization string, a
 	return nil
 }
 
-func normalizeChallengeToken(token string) bool {
+func validChallengeToken(token string) bool {
 	if token == "" || len(token) > 256 {
 		return false
 	}

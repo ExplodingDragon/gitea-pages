@@ -1,3 +1,6 @@
+// Copyright 2026 The Gitea Authors. All rights reserved.
+// SPDX-License-Identifier: MIT
+
 package page
 
 import (
@@ -19,6 +22,10 @@ type testTarEntry struct {
 	link string
 	mode int64
 	size int64
+}
+
+func testArchiveLimits() ArchiveLimits {
+	return ArchiveLimits{MaxTarGzBytes: 100 * 1024 * 1024, MaxSiteBytes: 512 * 1024 * 1024, MaxFileBytes: 100 * 1024 * 1024, MaxEntries: 10_000}
 }
 
 func makeArchive(t *testing.T, entries ...testTarEntry) *os.File {
@@ -66,17 +73,17 @@ func makeArchive(t *testing.T, entries ...testTarEntry) *os.File {
 }
 
 func TestExtractTarGzSanitizesFilesAndAcceptsMissingInRootSymlink(t *testing.T) {
-	f := makeArchive(t, testTarEntry{name: "index.html", kind: tar.TypeReg, body: "ok", mode: 0755}, testTarEntry{name: "assets/logo", kind: tar.TypeSymlink, link: "../missing/logo"})
+	f := makeArchive(t, testTarEntry{name: "index.html", kind: tar.TypeReg, body: "ok", mode: 0o755}, testTarEntry{name: "assets/logo", kind: tar.TypeSymlink, link: "../missing/logo"})
 	defer func() { _ = f.Close() }()
 	target := filepath.Join(t.TempDir(), "site")
-	if err := ExtractTarGz(t.Context(), f, target, 42, strings.Repeat("a", 64)); err != nil {
+	if err := ExtractTarGz(t.Context(), f, target, 42, strings.Repeat("a", 64), testArchiveLimits()); err != nil {
 		t.Fatal(err)
 	}
 	info, err := os.Stat(filepath.Join(target, "index.html"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if info.Mode().Perm() != 0644 {
+	if info.Mode().Perm() != 0o644 {
 		t.Fatalf("file mode = %o", info.Mode().Perm())
 	}
 	link, err := os.Readlink(filepath.Join(target, "assets/logo"))
@@ -100,8 +107,18 @@ func TestExtractTarGzHonorsDeploymentCancellation(t *testing.T) {
 	defer func() { _ = f.Close() }()
 	ctx, cancel := context.WithCancel(t.Context())
 	cancel()
-	if err := ExtractTarGz(ctx, f, filepath.Join(t.TempDir(), "site"), 1, strings.Repeat("a", 64)); err != context.Canceled {
+	if err := ExtractTarGz(ctx, f, filepath.Join(t.TempDir(), "site"), 1, strings.Repeat("a", 64), testArchiveLimits()); err != context.Canceled {
 		t.Fatalf("error = %v, want context cancellation", err)
+	}
+}
+
+func TestExtractTarGzUsesSynchronizedLimits(t *testing.T) {
+	f := makeArchive(t, testTarEntry{name: "index.html", kind: tar.TypeReg, body: "too large"})
+	defer func() { _ = f.Close() }()
+	limits := testArchiveLimits()
+	limits.MaxFileBytes = 4
+	if err := ExtractTarGz(t.Context(), f, filepath.Join(t.TempDir(), "site"), 1, strings.Repeat("a", 64), limits); err == nil {
+		t.Fatal("archive exceeded the synchronized file limit")
 	}
 }
 
@@ -110,7 +127,7 @@ func TestExtractTarGzRejectsEscapeAndReservedPath(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			f := makeArchive(t, testTarEntry{name: name, kind: tar.TypeReg, body: "bad"})
 			defer func() { _ = f.Close() }()
-			err := ExtractTarGz(t.Context(), f, filepath.Join(t.TempDir(), "site"), 1, strings.Repeat("b", 64))
+			err := ExtractTarGz(t.Context(), f, filepath.Join(t.TempDir(), "site"), 1, strings.Repeat("b", 64), testArchiveLimits())
 			if err == nil {
 				t.Fatal("expected archive rejection")
 			}
@@ -121,7 +138,7 @@ func TestExtractTarGzRejectsEscapeAndReservedPath(t *testing.T) {
 		testTarEntry{name: "outside/file.txt", kind: tar.TypeReg, body: "bad"},
 	)
 	defer func() { _ = f.Close() }()
-	if err := ExtractTarGz(t.Context(), f, filepath.Join(t.TempDir(), "site"), 1, strings.Repeat("b", 64)); err == nil {
+	if err := ExtractTarGz(t.Context(), f, filepath.Join(t.TempDir(), "site"), 1, strings.Repeat("b", 64), testArchiveLimits()); err == nil {
 		t.Fatal("expected symlink parent rejection")
 	}
 }
@@ -169,7 +186,7 @@ func TestExtractTarGzRejectsUnsafeArchiveDetails(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			f := makeArchive(t, tt.entries...)
 			defer func() { _ = f.Close() }()
-			if err := ExtractTarGz(t.Context(), f, filepath.Join(t.TempDir(), "site"), 1, strings.Repeat("b", 64)); err == nil {
+			if err := ExtractTarGz(t.Context(), f, filepath.Join(t.TempDir(), "site"), 1, strings.Repeat("b", 64), testArchiveLimits()); err == nil {
 				t.Fatal("expected archive rejection")
 			}
 		})
@@ -191,7 +208,7 @@ func TestExtractTarGzRejectsConcatenatedGzipMembers(t *testing.T) {
 	}
 	joined := append(firstData, secondData...)
 	archive := filepath.Join(t.TempDir(), "joined.tar.gz")
-	if err := os.WriteFile(archive, joined, 0600); err != nil {
+	if err := os.WriteFile(archive, joined, 0o600); err != nil {
 		t.Fatal(err)
 	}
 	f, err := os.Open(archive)
@@ -199,7 +216,7 @@ func TestExtractTarGzRejectsConcatenatedGzipMembers(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer func() { _ = f.Close() }()
-	if err := ExtractTarGz(t.Context(), f, filepath.Join(t.TempDir(), "site"), 1, strings.Repeat("b", 64)); err == nil {
+	if err := ExtractTarGz(t.Context(), f, filepath.Join(t.TempDir(), "site"), 1, strings.Repeat("b", 64), testArchiveLimits()); err == nil {
 		t.Fatal("expected concatenated gzip rejection")
 	}
 }
@@ -232,7 +249,7 @@ func TestExtractTarGzRejectsNonZeroTarTail(t *testing.T) {
 		t.Fatal(err)
 	}
 	path := filepath.Join(t.TempDir(), "tail.tar.gz")
-	if err := os.WriteFile(path, withTail.Bytes(), 0600); err != nil {
+	if err := os.WriteFile(path, withTail.Bytes(), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	f, err := os.Open(path)
@@ -240,7 +257,7 @@ func TestExtractTarGzRejectsNonZeroTarTail(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer func() { _ = f.Close() }()
-	if err := ExtractTarGz(t.Context(), f, filepath.Join(t.TempDir(), "site"), 1, strings.Repeat("b", 64)); err == nil {
+	if err := ExtractTarGz(t.Context(), f, filepath.Join(t.TempDir(), "site"), 1, strings.Repeat("b", 64), testArchiveLimits()); err == nil {
 		t.Fatal("expected non-zero TAR tail rejection")
 	}
 }

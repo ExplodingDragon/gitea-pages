@@ -69,9 +69,9 @@ func run(mode page.Mode) error {
 		return err
 	}
 
-	var applier interface{ Apply(context.Context) error }
+	var nginxPublisher *page.NginxPublisher
 	if mode == page.ModeNginx {
-		applier, err = page.NewNginxPublisher(cfg, store)
+		nginxPublisher, err = page.NewNginxPublisher(cfg, store)
 		if err != nil {
 			return err
 		}
@@ -81,10 +81,15 @@ func run(mode page.Mode) error {
 			}
 		}
 	}
-	syncer := page.NewSyncer(cfg, client, store, server, applier)
+	var syncer *page.Syncer
+	if nginxPublisher != nil {
+		syncer = page.NewSyncer(cfg, client, store, server, nginxPublisher)
+	} else {
+		syncer = page.NewSyncer(cfg, client, store, server, nil)
+	}
 	if certManager != nil {
-		if responder, ok := applier.(page.ChallengeResponder); ok {
-			syncer.SetCertificateServices(certManager, acmeManager, cfg.HTTP01ProbeAddresses, responder)
+		if nginxPublisher != nil {
+			syncer.SetCertificateServices(certManager, acmeManager, cfg.HTTP01ProbeAddresses, nginxPublisher)
 		} else {
 			syncer.SetCertificateServices(certManager, acmeManager, cfg.HTTP01ProbeAddresses, server)
 		}
@@ -110,7 +115,7 @@ func configureCertificates(cfg page.Config, store *page.Store) (*page.Certificat
 
 	var acme *page.ACMEManager
 	if cfg.ACMEDirectoryURL != "" {
-		acme, err = page.NewACMEManager(store, cfg.ACMEDirectoryURL, cfg.ACMEEmail)
+		acme, err = page.NewACMEManager(store, cfg.ACMEDirectoryURL, cfg.ACMEEmail, cfg.ACMEDNSResolver)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -122,7 +127,7 @@ func configureCertificates(cfg page.Config, store *page.Store) (*page.Certificat
 		}
 	}
 	if !certificates.HasUsable("") && (acme == nil || cfg.DNSProvider == "") {
-		return nil, nil, fmt.Errorf("HTTPS Pages requires a usable default certificate or configured ACME DNS-01 provider")
+		return nil, nil, errors.New("HTTPS Pages requires a usable default certificate or configured ACME DNS-01 provider")
 	}
 	// The certificate maintenance loop performs issuance asynchronously after
 	// the service has started. This keeps startup independent of the ACME
@@ -154,7 +159,7 @@ func serveStandalone(ctx context.Context, cfg page.Config, server *page.Server, 
 	ready := make(chan struct{}, 2)
 	listeners := make([]net.Listener, 1)
 	listeners[0] = &readyListener{Listener: httpListener, ready: ready}
-	httpServer := &http.Server{Handler: server.Handler(), ReadHeaderTimeout: 10 * time.Second}
+	httpServer := &http.Server{Handler: server.Handler(false), ReadHeaderTimeout: 10 * time.Second}
 	servers = append(servers, httpServer)
 
 	if cfg.RootURL.Scheme == "https" {
@@ -168,7 +173,7 @@ func serveStandalone(ctx context.Context, cfg page.Config, server *page.Server, 
 			return fmt.Errorf("listen Pages HTTPS: %w", listenErr)
 		}
 		listeners = append(listeners, tls.NewListener(&readyListener{Listener: httpsListener, ready: ready}, certificates.TLSConfig()))
-		servers = append(servers, &http.Server{Handler: server.WithHTTPS().Handler(), ReadHeaderTimeout: 10 * time.Second})
+		servers = append(servers, &http.Server{Handler: server.Handler(true), ReadHeaderTimeout: 10 * time.Second})
 	}
 
 	serveErrors := make(chan error, len(servers)+1)

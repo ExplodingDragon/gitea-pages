@@ -1,22 +1,21 @@
+// Copyright 2026 The Gitea Authors. All rights reserved.
+// SPDX-License-Identifier: MIT
+
 package page
 
-// The nginx publisher owns generated files, while nginx owns the listening
-// sockets. A candidate is checked and reloaded atomically so stopping Pages
-// does not stop an already working nginx instance.
 import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
+	"log/slog"
 	"os"
-	"os/exec"
 	"path/filepath"
-	"sort"
-	"strconv"
 	"strings"
-	"time"
 )
 
+// NginxPublisher renders, validates, and activates the external Nginx entry.
 type NginxPublisher struct {
 	cfg            Config
 	store          *Store
@@ -26,17 +25,18 @@ type NginxPublisher struct {
 type nginxLocation struct{ base, root, marker string }
 type nginxMarker struct{ path, body string }
 
+// NewNginxPublisher prepares the configured Nginx output directories.
 func NewNginxPublisher(cfg Config, store *Store) (*NginxPublisher, error) {
-	if err := os.MkdirAll(cfg.NginxRoot, 0755); err != nil {
+	if err := os.MkdirAll(cfg.NginxRoot, 0o755); err != nil {
 		return nil, err
 	}
 	if cfg.NginxHTTP01Root != "" {
 		if info, err := os.Lstat(cfg.NginxHTTP01Root); err == nil && info.Mode()&os.ModeSymlink != 0 {
-			return nil, fmt.Errorf("nginx HTTP-01 directory must not be a symbolic link")
+			return nil, errors.New("nginx HTTP-01 directory must not be a symbolic link")
 		} else if err != nil && !os.IsNotExist(err) {
 			return nil, err
 		}
-		if err := os.MkdirAll(cfg.NginxHTTP01Root, 0755); err != nil {
+		if err := os.MkdirAll(cfg.NginxHTTP01Root, 0o755); err != nil {
 			return nil, err
 		}
 		realHTTP01, err := filepath.EvalSymlinks(cfg.NginxHTTP01Root)
@@ -51,8 +51,8 @@ func NewNginxPublisher(cfg Config, store *Store) (*NginxPublisher, error) {
 		if err != nil {
 			return nil, err
 		}
-		if withinPath(realData, realHTTP01) || withinPath(realNginx, realHTTP01) {
-			return nil, fmt.Errorf("nginx HTTP-01 directory contains Pages data or output")
+		if pathWithin(realData, realHTTP01) || pathWithin(realNginx, realHTTP01) {
+			return nil, errors.New("nginx HTTP-01 directory contains Pages data or output")
 		}
 		// An interrupted lego order is restarted as a fresh order. Remove its
 		// old challenge files before publishing this process's configuration.
@@ -85,10 +85,10 @@ func (p *NginxPublisher) exportPublic() error {
 			continue
 		}
 		target := filepath.Join(root, filepath.FromSlash(name))
-		if err := os.MkdirAll(filepath.Dir(target), 0755); err != nil {
+		if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
 			return err
 		}
-		if err := writeMarker(target, body, 0644); err != nil {
+		if err := atomicWriteFile(target, body, 0o644); err != nil {
 			return err
 		}
 		if strings.HasPrefix(name, "assets/") {
@@ -137,8 +137,8 @@ func (p *NginxPublisher) SetChallenge(host, token, key string) {
 	if d == "" {
 		return
 	}
-	_ = os.MkdirAll(d, 0755)
-	_ = writeMarker(filepath.Join(d, token), []byte(key), 0644)
+	_ = os.MkdirAll(d, 0o755)
+	_ = atomicWriteFile(filepath.Join(d, token), []byte(key), 0o644)
 }
 
 func (p *NginxPublisher) ClearChallenge(host, token string) {
@@ -172,27 +172,22 @@ func (p *NginxPublisher) Apply(ctx context.Context) error {
 		// An active custom Host needs an HTTP challenge endpoint before it has
 		// a certificate or a published site route. The challenge file itself is
 		// created only while the authorized ACME flow is running.
-		for _, domain := range site.Site.CustomDomains {
-			if domain.State == "active" {
-				host := normalizeHost(domain.Host)
-				if _, ok := hosts[host]; !ok {
-					hosts[host] = nil
-				}
+		if site.Site.CustomDomain != nil {
+			host := normalizeHost(site.Site.CustomDomain.Host)
+			if _, ok := hosts[host]; !ok {
+				hosts[host] = nil
 			}
 		}
-		host := ownerHost(site.Site.OwnerName, p.cfg.RootURL.Hostname())
-		if host != "" {
-			loc := p.siteLocation(site, host)
+		host, base, ok := defaultSiteRoute(site.Site, p.cfg.RootURL.Hostname())
+		if ok {
+			loc := nginxLocation{base, p.store.SiteDir(site.Site.RepoID) + "/current/", p.routeMarker(host, base, site.Site.RepoID)}
 			hosts[host] = append(hosts[host], loc)
 			if site.InstalledDigest != "" && site.DefaultPublished {
 				markers[loc.marker] = nginxMarker{loc.marker, markerBody(host, loc.base, site.Site.RepoID)}
 			}
 		}
-		for _, domain := range site.Site.CustomDomains {
-			if domain.State != "active" {
-				continue
-			}
-			host := normalizeHost(domain.Host)
+		if site.Site.CustomDomain != nil {
+			host := normalizeHost(site.Site.CustomDomain.Host)
 			loc := nginxLocation{"/", p.store.SiteDir(site.Site.RepoID) + "/current/", p.routeMarker(host, "/", site.Site.RepoID)}
 			hosts[host] = append(hosts[host], loc)
 			if site.InstalledDigest != "" && site.CustomPublished {
@@ -223,8 +218,8 @@ func (p *NginxPublisher) Apply(ctx context.Context) error {
 		}
 	}
 	markerDir := filepath.Join(p.cfg.DataRoot, "route-state")
-	if targetMatches && p.readConfirmedReadyState() == readyState {
-		if err := os.MkdirAll(markerDir, 0755); err != nil {
+	if targetMatches && p.confirmedReadyState() == readyState {
+		if err := os.MkdirAll(markerDir, 0o755); err != nil {
 			return err
 		}
 		previousMarkers, err := snapshotMarkers(markerDir)
@@ -239,17 +234,17 @@ func (p *NginxPublisher) Apply(ctx context.Context) error {
 		return nil
 	}
 	confDir := filepath.Join(p.cfg.NginxRoot, "config", "snapshots", digest)
-	if err := os.MkdirAll(confDir, 0755); err != nil {
+	if err := os.MkdirAll(confDir, 0o755); err != nil {
 		return err
 	}
 	candidate := filepath.Join(confDir, "pages.conf")
-	if err := os.WriteFile(candidate, []byte(config), 0644); err != nil {
+	if err := os.WriteFile(candidate, []byte(config), 0o644); err != nil {
 		return err
 	}
-	if err := runConfigured(ctx, p.cfg.NginxTestCommand, candidate, p.cfg.NginxCommandTimeout); err != nil {
+	if err := runNginxCommand(ctx, p.cfg.NginxTestCommand, candidate, p.cfg.NginxCommandTimeout); err != nil {
 		return fmt.Errorf("nginx config test: %w", err)
 	}
-	if err := os.MkdirAll(markerDir, 0755); err != nil {
+	if err := os.MkdirAll(markerDir, 0o755); err != nil {
 		return err
 	}
 	previousMarkers, err := snapshotMarkers(markerDir)
@@ -257,11 +252,11 @@ func (p *NginxPublisher) Apply(ctx context.Context) error {
 		return err
 	}
 	readyPath := filepath.Join(markerDir, "config-ready")
-	previousReady, previousReadyExists, err := readOptional(readyPath)
+	previousReady, previousReadyExists, err := readOptionalFile(readyPath)
 	if err != nil {
 		return err
 	}
-	oldTarget, oldExists, err := readOptional(target)
+	oldTarget, oldExists, err := readOptionalFile(target)
 	if err != nil {
 		return err
 	}
@@ -272,18 +267,23 @@ func (p *NginxPublisher) Apply(ctx context.Context) error {
 	if err := os.Remove(readyPath); err != nil && !os.IsNotExist(err) {
 		return err
 	}
-	if err := atomicCopy(candidate, target, 0644); err != nil {
-		_ = restoreFile(readyPath, previousReady, previousReadyExists, 0644)
+	candidateConfig, err := os.ReadFile(candidate)
+	if err != nil {
+		_ = restoreFile(readyPath, previousReady, previousReadyExists, 0o644)
 		return err
 	}
-	if err := runConfigured(ctx, p.cfg.NginxReloadCommand, target, p.cfg.NginxCommandTimeout); err != nil {
+	if err := atomicWriteFile(target, candidateConfig, 0o644); err != nil {
+		_ = restoreFile(readyPath, previousReady, previousReadyExists, 0o644)
+		return err
+	}
+	if err := runNginxCommand(ctx, p.cfg.NginxReloadCommand, target, p.cfg.NginxCommandTimeout); err != nil {
 		// Certificate files are intentionally kept. The ready-state digest still
 		// describes the old running configuration, so the next Apply retries the
 		// new certificate material without introducing a second certificate
 		// transaction.
-		_ = restoreFile(target, oldTarget, oldExists, 0644)
+		_ = restoreFile(target, oldTarget, oldExists, 0o644)
 		_ = restoreMarkers(markerDir, previousMarkers)
-		_ = restoreFile(readyPath, previousReady, previousReadyExists, 0644)
+		_ = restoreFile(readyPath, previousReady, previousReadyExists, 0o644)
 		return fmt.Errorf("nginx reload: %w", err)
 	}
 	// The reload has installed the candidate. Commit the route markers and the
@@ -293,7 +293,7 @@ func (p *NginxPublisher) Apply(ctx context.Context) error {
 		_ = os.Remove(readyPath)
 		return fmt.Errorf("write nginx route markers: %w", err)
 	}
-	if err := writeMarker(readyPath, []byte(readyState), 0644); err != nil {
+	if err := atomicWriteFile(readyPath, []byte(readyState), 0o644); err != nil {
 		_ = os.Remove(readyPath)
 		return fmt.Errorf("write nginx ready state: %w", err)
 	}
@@ -313,17 +313,19 @@ func (p *NginxPublisher) cleanupSnapshots(currentDigest string) {
 		return
 	}
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "pages nginx snapshot cleanup: %v\n", err)
+		slog.Error("reading Nginx snapshots for cleanup failed", "error", err)
 		return
 	}
 
-	keep := map[string]struct{}{currentDigest: {}}
 	for _, entry := range entries {
 		name := entry.Name()
-		if len(name) != sha256.Size*2 || !isHexDigest(name) {
+		if len(name) != sha256.Size*2 {
 			continue
 		}
-		if _, ok := keep[name]; ok || entry.Type()&os.ModeSymlink != 0 || !entry.IsDir() {
+		if _, err := hex.DecodeString(name); err != nil {
+			continue
+		}
+		if name == currentDigest || entry.Type()&os.ModeSymlink != 0 || !entry.IsDir() {
 			continue
 		}
 		candidate := filepath.Join(root, name, "pages.conf")
@@ -332,29 +334,12 @@ func (p *NginxPublisher) cleanupSnapshots(currentDigest string) {
 			continue
 		}
 		if err := p.removeSnapshot(filepath.Join(root, name)); err != nil && !os.IsNotExist(err) {
-			fmt.Fprintf(os.Stderr, "pages nginx snapshot cleanup %s: %v\n", name, err)
+			slog.Error("cleaning Nginx snapshot failed", "snapshot", name, "error", err)
 		}
 	}
 }
 
-func isHexDigest(value string) bool {
-	for _, r := range value {
-		if !strings.ContainsRune("0123456789abcdef", r) {
-			return false
-		}
-	}
-	return true
-}
-
-func (p *NginxPublisher) confirmedConfigDigest() string {
-	b, err := os.ReadFile(filepath.Join(p.cfg.DataRoot, "route-state", "config-ready"))
-	if err != nil {
-		return ""
-	}
-	return strings.TrimSpace(strings.SplitN(string(b), "\n", 2)[0])
-}
-
-func (p *NginxPublisher) readConfirmedReadyState() string {
+func (p *NginxPublisher) confirmedReadyState() string {
 	b, err := os.ReadFile(filepath.Join(p.cfg.DataRoot, "route-state", "config-ready"))
 	if err != nil {
 		return ""
@@ -396,293 +381,4 @@ func (p *NginxPublisher) certificateDigest() (string, error) {
 		return "", err
 	}
 	return hex.EncodeToString(hash.Sum(nil)), nil
-}
-
-func (p *NginxPublisher) siteLocation(site LocalSite, host string) nginxLocation {
-	base := "/"
-	if !strings.EqualFold(site.Site.RepoName, ".pages") {
-		base = "/" + strings.ToLower(site.Site.RepoName) + "/"
-	}
-	return nginxLocation{base, p.store.SiteDir(site.Site.RepoID) + "/current/", p.routeMarker(host, base, site.Site.RepoID)}
-}
-
-func (p *NginxPublisher) routeMarker(host, base string, repoID int64) string {
-	sum := sha256.Sum256([]byte(host + "\x00" + base + "\x00" + strconv.FormatInt(repoID, 10)))
-	return filepath.Join(p.cfg.DataRoot, "route-state", "route-"+hex.EncodeToString(sum[:]))
-}
-
-func markerBody(host, base string, repoID int64) string {
-	return host + " " + base + " " + strconv.FormatInt(repoID, 10) + "\n"
-}
-
-func (p *NginxPublisher) render(hosts map[string][]nginxLocation) (string, error) {
-	var managed strings.Builder
-	managed.WriteString("# Generated by gitea-pages. Include this file from the nginx http context.\n")
-	managed.WriteString("# Pages owns the default servers below; use this file with a dedicated Pages nginx listener.\n")
-	p.writeFallbackServers(&managed)
-	names := make([]string, 0, len(hosts))
-	for host := range hosts {
-		names = append(names, host)
-	}
-	sort.Strings(names)
-	for _, host := range names {
-		locations := hosts[host]
-		sort.Slice(locations, func(i, j int) bool { return locations[i].base < locations[j].base })
-		p.writeServer(&managed, host, locations)
-	}
-	root := p.cfg.CustomRoot
-	if root == "" {
-		return managed.String(), nil
-	}
-	template, err := readCustomFile(filepath.Join(root, "nginx", "pages.conf.tmpl"))
-	if err != nil {
-		if os.IsNotExist(err) {
-			return managed.String(), nil
-		}
-		return "", err
-	}
-	if strings.Count(template, "{{ managed_config }}") != 1 {
-		return "", fmt.Errorf("nginx template must contain exactly one {{ managed_config }}")
-	}
-	server, err := readCustomOptional(filepath.Join(root, "nginx", "server.inc"))
-	if err != nil {
-		return "", err
-	}
-	location, err := readCustomOptional(filepath.Join(root, "nginx", "location.inc"))
-	if err != nil {
-		return "", err
-	}
-	managedText := strings.ReplaceAll(managed.String(), "server {", "server {\n"+server)
-	// The generated static locations all carry the index directive.  Inserting
-	// at that stable point keeps operator location.inc out of the ACME and
-	// platform locations, whose behavior must remain under Pages control.
-	managedText = strings.ReplaceAll(managedText, "index index.html;", "index index.html;\n"+location)
-	return strings.Replace(template, "{{ managed_config }}", managedText, 1), nil
-}
-
-func (p *NginxPublisher) writeFallbackServers(b *strings.Builder) {
-	fmt.Fprintln(b, `server { listen 80 default_server; server_name ""; return 404; }`)
-	if p.cfg.RootURL.Scheme != "https" {
-		return
-	}
-	// ssl_reject_handshake does not need a certificate and is available since
-	// nginx 1.19.4. It makes the default HTTPS server reject unknown SNI
-	// during the handshake, including while the Pages default certificate is
-	// still being obtained.
-	fmt.Fprintln(b, `server { listen 443 ssl default_server; server_name ""; ssl_reject_handshake on; }`)
-}
-
-func readCustomFile(path string) (string, error) {
-	info, err := os.Lstat(path)
-	if err != nil {
-		return "", err
-	}
-	if !info.Mode().IsRegular() || info.Size() > 16*1024*1024 {
-		return "", fmt.Errorf("custom nginx resource %s is not a regular file within the size limit", path)
-	}
-	b, err := os.ReadFile(path)
-	return string(b), err
-}
-
-func readCustomOptional(path string) (string, error) {
-	b, err := readCustomFile(path)
-	if os.IsNotExist(err) {
-		return "", nil
-	}
-	return b, err
-}
-
-func (p *NginxPublisher) writeServer(b *strings.Builder, host string, locations []nginxLocation) {
-	qhost := nginxQuote(host)
-	fmt.Fprintf(b, "server { listen 80; server_name %s; etag off; if_modified_since off; add_header X-Content-Type-Options nosniff always; add_header Cache-Control 'no-cache, must-revalidate' always;\n", qhost)
-	if p.cfg.RootURL.Scheme == "https" {
-		qroot := nginxQuote(p.cfg.NginxHTTP01Root + "/" + host + "/")
-		fmt.Fprintf(b, "location ^~ /.well-known/acme-challenge/ { alias %s; }\n", qroot)
-	}
-	fmt.Fprintln(b, "location = /@gitea-pages/ready { add_header Cache-Control 'no-store' always; return 204; }")
-	if p.cfg.RootURL.Scheme == "https" {
-		fmt.Fprintln(b, "location / { return 308 https://$host$request_uri; }")
-	} else {
-		p.writePlatformLocations(b, host)
-		writeLocations(b, locations, filepath.Join(p.cfg.DataRoot, "route-state", "config-ready"))
-	}
-	fmt.Fprintln(b, "}")
-	if p.cfg.RootURL.Scheme != "https" {
-		return
-	}
-	certDir := filepath.Join(p.cfg.NginxRoot, "certs", "default")
-	rootHost := normalizeHost(p.cfg.RootURL.Hostname())
-	if host != rootHost && !strings.HasSuffix(host, "."+rootHost) {
-		certDir = filepath.Join(p.cfg.NginxRoot, "certs", host)
-	}
-	if _, err := os.Stat(filepath.Join(certDir, "fullchain.pem")); err != nil {
-		return
-	}
-	if _, err := os.Stat(filepath.Join(certDir, "privkey.pem")); err != nil {
-		return
-	}
-	fmt.Fprintf(b, "server { listen 443 ssl; server_name %s; etag off; if_modified_since off; add_header X-Content-Type-Options nosniff always; add_header Cache-Control 'no-cache, must-revalidate' always;\n", qhost)
-	fmt.Fprintf(b, "ssl_certificate %s; ssl_certificate_key %s;\n", nginxQuote(filepath.Join(certDir, "fullchain.pem")), nginxQuote(filepath.Join(certDir, "privkey.pem")))
-	fmt.Fprintln(b, "location = /@gitea-pages/ready { add_header Cache-Control 'no-store' always; return 204; }")
-	p.writePlatformLocations(b, host)
-	writeLocations(b, locations, filepath.Join(p.cfg.DataRoot, "route-state", "config-ready"))
-	fmt.Fprintln(b, "}")
-}
-
-func (p *NginxPublisher) writePlatformLocations(b *strings.Builder, host string) {
-	public := filepath.Join(p.cfg.NginxRoot, "public")
-	fmt.Fprintf(b, "location ^~ /@gitea-pages/assets/ { alias %s; }\n", nginxQuote(filepath.Join(public, "assets")+"/"))
-	fmt.Fprintf(b, "error_page 404 /@gitea-pages/error404; location = /@gitea-pages/error404 { internal; add_header Cache-Control 'no-store' always; alias %s; }\n", nginxQuote(filepath.Join(public, "errors", "404.html")))
-	if host == normalizeHost(p.cfg.RootURL.Hostname()) {
-		fmt.Fprintf(b, "location = / { root %s; try_files /index.html =404; }\n", nginxQuote(public))
-	}
-}
-
-func writeLocations(b *strings.Builder, locations []nginxLocation, configMarker string) {
-	if len(locations) == 0 {
-		fmt.Fprintln(b, "location / { return 404; }")
-		return
-	}
-	hasRoot := false
-	for _, l := range locations {
-		if l.base == "/" {
-			hasRoot = true
-			fmt.Fprintf(b, "location / { if (!-f %s) { return 404; } if (!-f %s) { return 404; } root %s; index index.html; }\n", nginxQuote(configMarker), nginxQuote(l.marker), nginxQuote(l.root))
-		} else {
-			base := strings.TrimSuffix(l.base, "/")
-			fmt.Fprintf(b, "location = %s { return 308 %s$is_args$args; }\n", base, base+"/")
-			fmt.Fprintf(b, "location %s { if (!-f %s) { return 404; } if (!-f %s) { return 404; } alias %s; index index.html; }\n", l.base, nginxQuote(configMarker), nginxQuote(l.marker), nginxQuote(l.root))
-		}
-	}
-	if !hasRoot {
-		fmt.Fprintln(b, "location / { return 404; }")
-	}
-}
-
-func runConfigured(parent context.Context, command []string, candidate string, timeout time.Duration) error {
-	args := make([]string, len(command))
-	for i, v := range command {
-		args[i] = strings.ReplaceAll(v, "{candidate}", candidate)
-	}
-	if len(args) == 0 || args[0] == "" {
-		return fmt.Errorf("empty configured command")
-	}
-	ctx, cancel := context.WithTimeout(parent, timeout)
-	defer cancel()
-	cmd := exec.CommandContext(ctx, args[0], args[1:]...)
-	cmd.Stdout = os.Stderr
-	cmd.Stderr = os.Stderr
-	return cmd.Run()
-}
-
-func nginxQuote(s string) string { return strconv.Quote(s) }
-func readOptional(path string) ([]byte, bool, error) {
-	b, err := os.ReadFile(path)
-	if os.IsNotExist(err) {
-		return nil, false, nil
-	}
-	return b, err == nil, err
-}
-
-func atomicCopy(src, target string, mode os.FileMode) error {
-	b, err := os.ReadFile(src)
-	if err != nil {
-		return err
-	}
-	tmp := target + ".tmp"
-	if err := os.WriteFile(tmp, b, mode); err != nil {
-		return err
-	}
-	if err := os.Rename(tmp, target); err != nil {
-		_ = os.Remove(tmp)
-		return err
-	}
-	return nil
-}
-
-func restoreFile(path string, data []byte, exists bool, mode os.FileMode) error {
-	if !exists {
-		return os.Remove(path)
-	}
-	return os.WriteFile(path, data, mode)
-}
-
-func snapshotMarkers(dir string) (map[string][]byte, error) {
-	r := map[string][]byte{}
-	entries, err := os.ReadDir(dir)
-	if os.IsNotExist(err) {
-		return r, nil
-	}
-	if err != nil {
-		return nil, err
-	}
-	for _, e := range entries {
-		if e.Type().IsRegular() {
-			b, err := os.ReadFile(filepath.Join(dir, e.Name()))
-			if err != nil {
-				return nil, err
-			}
-			r[e.Name()] = b
-		}
-	}
-	return r, nil
-}
-
-func writeMarkers(dir string, markers map[string]nginxMarker, removeStale bool) error {
-	keep := map[string]struct{}{"config-ready": {}}
-	for _, m := range markers {
-		name := filepath.Base(m.path)
-		keep[name] = struct{}{}
-		if err := writeMarker(m.path, []byte(m.body), 0644); err != nil {
-			return err
-		}
-	}
-	if !removeStale {
-		return nil
-	}
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		return err
-	}
-	for _, e := range entries {
-		if e.Type().IsRegular() {
-			if _, ok := keep[e.Name()]; !ok {
-				if err := os.Remove(filepath.Join(dir, e.Name())); err != nil && !os.IsNotExist(err) {
-					return err
-				}
-			}
-		}
-	}
-	return nil
-}
-
-func writeMarker(path string, body []byte, mode os.FileMode) error {
-	if err := os.WriteFile(path+".tmp", body, mode); err != nil {
-		return err
-	}
-	if err := os.Rename(path+".tmp", path); err != nil {
-		_ = os.Remove(path + ".tmp")
-		return err
-	}
-	return nil
-}
-
-func restoreMarkers(dir string, previous map[string][]byte) error {
-	entries, err := os.ReadDir(dir)
-	if err != nil && !os.IsNotExist(err) {
-		return err
-	}
-	for _, e := range entries {
-		if e.Type().IsRegular() {
-			if _, ok := previous[e.Name()]; !ok {
-				_ = os.Remove(filepath.Join(dir, e.Name()))
-			}
-		}
-	}
-	for name, b := range previous {
-		if err := writeMarker(filepath.Join(dir, name), b, 0644); err != nil {
-			return err
-		}
-	}
-	return nil
 }

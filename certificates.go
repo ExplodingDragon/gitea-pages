@@ -1,3 +1,6 @@
+// Copyright 2026 The Gitea Authors. All rights reserved.
+// SPDX-License-Identifier: MIT
+
 package page
 
 import (
@@ -8,6 +11,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"encoding/pem"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -16,6 +20,7 @@ import (
 	"time"
 )
 
+// CertificateRecord is the durable certificate material managed by Pages.
 type CertificateRecord struct {
 	Host           string    `json:"host"`
 	CertificatePEM string    `json:"certificate_pem"`
@@ -23,6 +28,8 @@ type CertificateRecord struct {
 	Source         string    `json:"source"`
 	NotAfter       time.Time `json:"not_after"`
 }
+
+// CertificateManager persists certificates and builds the active TLS view.
 type CertificateManager struct {
 	store   *Store
 	mu      sync.RWMutex
@@ -39,7 +46,7 @@ func (m *CertificateManager) ExportNginx(root string) error {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	out := filepath.Join(root, "certs")
-	if err := os.MkdirAll(out, 0755); err != nil {
+	if err := os.MkdirAll(out, 0o755); err != nil {
 		return err
 	}
 	for host, r := range m.records {
@@ -47,13 +54,13 @@ func (m *CertificateManager) ExportNginx(root string) error {
 		if host == "" {
 			dir = filepath.Join(out, "default")
 		}
-		if err := os.MkdirAll(dir, 0755); err != nil {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
 			return err
 		}
-		if err := writeAtomicCertificate(filepath.Join(dir, "fullchain.pem"), []byte(r.CertificatePEM), 0644); err != nil {
+		if err := atomicWriteFile(filepath.Join(dir, "fullchain.pem"), []byte(r.CertificatePEM), 0o644); err != nil {
 			return err
 		}
-		if err := writeAtomicCertificate(filepath.Join(dir, "privkey.pem"), []byte(r.PrivateKeyPEM), 0600); err != nil {
+		if err := atomicWriteFile(filepath.Join(dir, "privkey.pem"), []byte(r.PrivateKeyPEM), 0o600); err != nil {
 			return err
 		}
 	}
@@ -94,26 +101,7 @@ func (m *CertificateManager) PruneUnusedCustom(allowed map[string]struct{}) (boo
 	return changed, nil
 }
 
-func writeAtomicCertificate(target string, data []byte, mode os.FileMode) error {
-	tmp, err := os.CreateTemp(filepath.Dir(target), ".certificate-")
-	if err != nil {
-		return err
-	}
-	defer func() { _ = os.Remove(tmp.Name()) }()
-	if err := tmp.Chmod(mode); err != nil {
-		_ = tmp.Close()
-		return err
-	}
-	if _, err := tmp.Write(data); err != nil {
-		_ = tmp.Close()
-		return err
-	}
-	if err := tmp.Close(); err != nil {
-		return err
-	}
-	return os.Rename(tmp.Name(), target)
-}
-
+// NewCertificateManager restores stored and operator-provided certificates.
 func NewCertificateManager(store *Store, root string) (*CertificateManager, error) {
 	m := &CertificateManager{store: store, records: map[string]CertificateRecord{}, parsed: map[string]*tls.Certificate{}}
 	var defaultRecord CertificateRecord
@@ -153,7 +141,7 @@ func NewCertificateManager(store *Store, root string) (*CertificateManager, erro
 		}
 		r.Host = strings.ToLower(strings.TrimSuffix(r.Host, "."))
 		if r.Host == "" {
-			return fmt.Errorf("stored custom certificate has an empty host")
+			return errors.New("stored custom certificate has an empty host")
 		}
 		m.records[r.Host] = r
 		return nil
@@ -178,7 +166,7 @@ func NewCertificateManager(store *Store, root string) (*CertificateManager, erro
 		}
 		if !certMissing && !keyMissing {
 			if !certInfo.Mode().IsRegular() || !keyInfo.Mode().IsRegular() {
-				return nil, fmt.Errorf("default certificate files must be regular files")
+				return nil, errors.New("default certificate files must be regular files")
 			}
 			r, err := readCertificateFiles(certPath, keyPath, "")
 			if err != nil {
@@ -430,7 +418,7 @@ func validateStoredCertificate(r CertificateRecord) error {
 func certificateLeaf(r CertificateRecord) (*x509.Certificate, error) {
 	block, _ := pem.Decode([]byte(r.CertificatePEM))
 	if block == nil {
-		return nil, fmt.Errorf("certificate PEM is invalid")
+		return nil, errors.New("certificate PEM is invalid")
 	}
 	cert, err := x509.ParseCertificate(block.Bytes)
 	if err != nil {

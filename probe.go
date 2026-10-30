@@ -1,8 +1,12 @@
+// Copyright 2026 The Gitea Authors. All rights reserved.
+// SPDX-License-Identifier: MIT
+
 package page
 
 import (
 	"context"
 	"crypto/tls"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -23,7 +27,7 @@ func (s *Syncer) probeEntry(ctx context.Context, host, base string, repoID int64
 	}
 	path := base + ".gitea-pages-probe"
 	if !strings.HasPrefix(path, "/") {
-		return fmt.Errorf("invalid probe path")
+		return errors.New("invalid probe path")
 	}
 	return probeHTTP(ctx, s.cfg.RootURL.Scheme, address, host, path, http.StatusOK, strconv.FormatInt(repoID, 10)+" "+digest+"\n")
 }
@@ -73,7 +77,7 @@ func localListenAddress(listen string) (string, error) {
 
 func probeHTTP(ctx context.Context, scheme, address, host, path string, status int, body string) error {
 	if address == "" || host == "" {
-		return fmt.Errorf("entry probe address or Host is empty")
+		return errors.New("entry probe address or Host is empty")
 	}
 	transport := &http.Transport{
 		Proxy: nil,

@@ -1,3 +1,6 @@
+// Copyright 2026 The Gitea Authors. All rights reserved.
+// SPDX-License-Identifier: MIT
+
 package page
 
 import (
@@ -6,6 +9,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -17,12 +21,14 @@ import (
 	"time"
 )
 
+// Client calls the authenticated Gitea Pages synchronization endpoints.
 type Client struct {
 	base  *url.URL
 	token string
 	http  *http.Client
 }
 
+// NewClient creates a client from the instance configuration.
 func NewClient(cfg Config) *Client {
 	// A content transfer uses the deployment context (which can be longer than
 	// a control request). Control requests receive their own short deadline.
@@ -60,9 +66,9 @@ func (c *Client) ListSites(ctx context.Context, full bool, since, until, afterTi
 	return out, nil
 }
 
-func (c *Client) DownloadContent(ctx context.Context, repoID int64, digest string, dst *os.File) error {
-	if !validDigest(digest) {
-		return fmt.Errorf("invalid content digest")
+func (c *Client) DownloadContent(ctx context.Context, repoID int64, digest string, maxBytes int64, dst *os.File) error {
+	if !isSHA256Digest(digest) || maxBytes <= 0 {
+		return errors.New("invalid content digest")
 	}
 	endpoint := path.Join("/api/internal/pages/sites", strconv.FormatInt(repoID, 10), "content", digest)
 	req, err := c.request(ctx, http.MethodGet, endpoint, nil)
@@ -78,12 +84,12 @@ func (c *Client) DownloadContent(ctx context.Context, repoID int64, digest strin
 		return readAPIError(resp)
 	}
 	h := sha256.New()
-	n, err := io.Copy(io.MultiWriter(dst, h), io.LimitReader(resp.Body, maxCompressedArchiveBytes+1))
+	n, err := io.Copy(io.MultiWriter(dst, h), io.LimitReader(resp.Body, maxBytes+1))
 	if err != nil {
 		return err
 	}
-	if n > maxCompressedArchiveBytes {
-		return fmt.Errorf("content archive exceeds %d bytes", maxCompressedArchiveBytes)
+	if n > maxBytes {
+		return fmt.Errorf("content archive exceeds %d bytes", maxBytes)
 	}
 	if got := hex.EncodeToString(h.Sum(nil)); got != digest {
 		return fmt.Errorf("content digest mismatch: got %s", got)
@@ -91,7 +97,7 @@ func (c *Client) DownloadContent(ctx context.Context, repoID int64, digest strin
 	return nil
 }
 
-func (c *Client) ReportResult(ctx context.Context, result Result) error {
+func (c *Client) ReportResult(ctx context.Context, result DeploymentResult) error {
 	return c.doJSON(ctx, http.MethodPost, "/api/internal/pages/results", result, nil)
 }
 
@@ -145,12 +151,11 @@ func (c *Client) doJSON(ctx context.Context, method, endpoint string, body, out 
 
 func readAPIError(resp *http.Response) error {
 	var v struct {
-		Code    string `json:"code"`
-		Message string `json:"message"`
+		Code string `json:"code"`
 	}
 	_ = json.NewDecoder(io.LimitReader(resp.Body, 1*1024*1024)).Decode(&v)
 	if v.Code == "" {
 		v.Code = resp.Status
 	}
-	return &APIError{Status: resp.StatusCode, Code: v.Code, Message: v.Message}
+	return &APIError{Code: v.Code}
 }

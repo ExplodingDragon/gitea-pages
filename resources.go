@@ -1,7 +1,11 @@
+// Copyright 2026 The Gitea Authors. All rights reserved.
+// SPDX-License-Identifier: MIT
+
 package page
 
 import (
 	"embed"
+	"errors"
 	"fmt"
 	"io/fs"
 	"os"
@@ -74,7 +78,7 @@ func loadPlatformResources(customRoot string) (platformResources, error) {
 			}
 			count++
 			if count > maxCustomResourceFiles {
-				return fmt.Errorf("too many custom resource files")
+				return errors.New("too many custom resource files")
 			}
 			total += info.Size()
 			if total > maxCustomResourceBytes {
@@ -82,7 +86,7 @@ func loadPlatformResources(customRoot string) (platformResources, error) {
 			}
 			rel, err := filepath.Rel(customRoot, name)
 			if err != nil || filepath.IsAbs(rel) || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
-				return fmt.Errorf("custom resource escapes root")
+				return errors.New("custom resource escapes root")
 			}
 			rel = filepath.ToSlash(rel)
 			if !strings.HasPrefix(rel, "public/") {
