@@ -30,11 +30,17 @@ const (
 	maxLinkDepth = 32
 )
 
+type archiveEntryKind uint8
+
+const (
+	archiveEntryRegular archiveEntryKind = iota
+	archiveEntryDirectory
+	archiveEntrySymlink
+)
+
 type archiveEntry struct {
-	name string
-	kind byte
-	temp string
-	link string
+	kind       archiveEntryKind
+	temp, link string
 }
 
 // extractTarGz validates and expands one site into a new target directory.
@@ -91,7 +97,7 @@ func extractTarGz(ctx context.Context, src *os.File, target string, limits archi
 	}()
 	var total int64
 	count := 0
-	regularFiles := 0
+	hasRegularFile := false
 	for {
 		h, err := tr.Next()
 		if err == io.EOF {
@@ -125,31 +131,32 @@ func extractTarGz(ctx context.Context, src *os.File, target string, limits archi
 		if _, ok := entries[name]; ok {
 			return fmt.Errorf("duplicate archive path %q", name)
 		}
-		var kind byte
+		var kind archiveEntryKind
 		switch h.Typeflag {
 		case tar.TypeReg:
-			kind = 'f'
+			kind = archiveEntryRegular
 			if h.Size < 0 || h.Size > limits.MaxFileBytes {
 				return fmt.Errorf("file %q is too large", name)
 			}
 		case tar.TypeDir:
-			kind = 'd'
+			kind = archiveEntryDirectory
 			if h.Size != 0 {
 				return fmt.Errorf("directory %q has data", name)
 			}
 		case tar.TypeSymlink:
-			kind = 'l'
+			kind = archiveEntrySymlink
 			if h.Size != 0 {
 				return fmt.Errorf("symlink %q has data", name)
 			}
-			if err := validateLink(h.Linkname); err != nil {
+			if err := validateArchiveLinkTarget(h.Linkname); err != nil {
 				return fmt.Errorf("link %q: %w", name, err)
 			}
 		default:
 			return fmt.Errorf("unsupported tar entry %q", name)
 		}
-		if kind == 'f' {
-			regularFiles++
+		entry := archiveEntry{kind: kind, link: h.Linkname}
+		if kind == archiveEntryRegular {
+			hasRegularFile = true
 			if h.Size > limits.MaxSiteBytes-total {
 				return errors.New("site is too large")
 			}
@@ -166,10 +173,9 @@ func extractTarGz(ctx context.Context, src *os.File, target string, limits archi
 			if closeErr != nil {
 				return closeErr
 			}
-			entries[name] = archiveEntry{name: name, kind: kind, temp: tmp.Name()}
-		} else {
-			entries[name] = archiveEntry{name: name, kind: kind, link: h.Linkname}
+			entry.temp = tmp.Name()
 		}
+		entries[name] = entry
 	}
 	// tar.Reader stops after the two zero records that terminate a TAR. Read
 	// the rest of the member explicitly so an oversized or non-zero TAR tail is
@@ -197,13 +203,10 @@ func extractTarGz(ctx context.Context, src *os.File, target string, limits archi
 	} else if err != io.EOF {
 		return fmt.Errorf("read after gzip stream: %w", err)
 	}
-	if len(entries) == 0 {
-		return errors.New("empty site archive")
-	}
-	if regularFiles == 0 {
+	if !hasRegularFile {
 		return errors.New("site archive has no regular file")
 	}
-	if err := validateArchive(entries); err != nil {
+	if err := validateArchiveTree(entries); err != nil {
 		return err
 	}
 	names := make([]string, 0, len(entries))
@@ -213,45 +216,29 @@ func extractTarGz(ctx context.Context, src *os.File, target string, limits archi
 	sort.Strings(names)
 	for _, n := range names {
 		e := entries[n]
-		if e.kind != 'd' {
-			continue
-		}
-		if err := os.MkdirAll(filepath.Join(target, filepath.FromSlash(n)), 0o755); err != nil {
-			return err
-		}
-	}
-	for _, n := range names {
-		e := entries[n]
-		if e.kind != 'f' {
-			continue
-		}
 		p := filepath.Join(target, filepath.FromSlash(n))
-		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
-			return err
-		}
-		if err := os.Chmod(e.temp, 0o600); err != nil {
-			return err
-		}
-		if err := os.Rename(e.temp, p); err != nil {
-			return err
-		}
-		// Published files are always data files. Archive mode bits are not
-		// allowed to make a served file executable.
-		if err := os.Chmod(p, 0o644); err != nil {
-			return err
-		}
-	}
-	for _, n := range names {
-		e := entries[n]
-		if e.kind != 'l' {
-			continue
-		}
-		p := filepath.Join(target, filepath.FromSlash(n))
-		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
-			return err
-		}
-		if err := os.Symlink(e.link, p); err != nil {
-			return err
+		switch e.kind {
+		case archiveEntryDirectory:
+			if err := os.MkdirAll(p, 0o755); err != nil {
+				return err
+			}
+		case archiveEntryRegular, archiveEntrySymlink:
+			if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+				return err
+			}
+			if e.kind == archiveEntrySymlink {
+				if err := os.Symlink(e.link, p); err != nil {
+					return err
+				}
+				continue
+			}
+			if err := os.Rename(e.temp, p); err != nil {
+				return err
+			}
+			// Archive modes never make published files executable.
+			if err := os.Chmod(p, 0o644); err != nil {
+				return err
+			}
 		}
 	}
 	return nil
@@ -284,24 +271,22 @@ func archivePath(raw string) (string, error) {
 	if len(parts) == 0 {
 		return "", nil
 	}
-	out := make([]string, 0, len(parts))
-	for _, p := range parts {
-		if p == "" || p == "." || p == ".." || hasArchiveControl(p) {
+	for _, part := range parts {
+		if part == "" || part == "." || part == ".." || hasArchiveControl(part) {
 			return "", fmt.Errorf("invalid archive path %q", raw)
 		}
-		out = append(out, p)
 	}
-	if len(out) > maxPathDepth {
+	if len(parts) > maxPathDepth {
 		return "", fmt.Errorf("archive path %q is too deep", raw)
 	}
-	name := strings.Join(out, "/")
+	name := strings.Join(parts, "/")
 	if len(name) > maxPathBytes {
 		return "", fmt.Errorf("archive path %q is too long", raw)
 	}
 	return name, nil
 }
 
-func validateLink(raw string) error {
+func validateArchiveLinkTarget(raw string) error {
 	if raw == "" || !utf8.ValidString(raw) || len(raw) > maxPathBytes || strings.ContainsRune(raw, '\x00') || strings.ContainsRune(raw, '\\') || hasArchiveControl(raw) || strings.HasPrefix(raw, "/") || strings.HasPrefix(raw, "//") || windowsArchiveVolume(raw) {
 		return errors.New("invalid relative target")
 	}
@@ -332,10 +317,8 @@ type boundedArchiveReader struct {
 }
 
 func (r *boundedArchiveReader) Read(p []byte) (int, error) {
-	if r.ctx != nil {
-		if err := r.ctx.Err(); err != nil {
-			return 0, err
-		}
+	if err := r.ctx.Err(); err != nil {
+		return 0, err
 	}
 	if r.n >= r.limit {
 		return 0, fmt.Errorf("TAR data exceeds %d bytes", r.limit)
@@ -348,75 +331,69 @@ func (r *boundedArchiveReader) Read(p []byte) (int, error) {
 	return n, err
 }
 
-func validateArchive(es map[string]archiveEntry) error {
-	for n, e := range es {
-		if e.kind == 'l' {
-			if _, err := resolveArchiveLink(n, es, 0); err != nil {
-				return err
+func validateArchiveTree(entries map[string]archiveEntry) error {
+	for name, entry := range entries {
+		parts := strings.Split(name, "/")
+		for i := 1; i < len(parts); i++ {
+			parent := strings.Join(parts[:i], "/")
+			if parentEntry, ok := entries[parent]; ok && parentEntry.kind != archiveEntryDirectory {
+				return fmt.Errorf("path %q has non-directory parent %q", name, parent)
 			}
 		}
-		parent := path.Dir(n)
-		for parent != "." {
-			if x, ok := es[parent]; ok && x.kind != 'd' {
-				return fmt.Errorf("path %q has non-directory parent %q", n, parent)
+		if entry.kind == archiveEntrySymlink {
+			if err := resolveArchiveLink(name, entries); err != nil {
+				return err
 			}
-			parent = path.Dir(parent)
 		}
 	}
 	return nil
 }
 
-func resolveArchiveLink(name string, es map[string]archiveEntry, depth int) (string, error) {
-	if depth > maxLinkDepth {
-		return "", errors.New("symlink depth exceeded")
+func resolveArchiveLink(name string, entries map[string]archiveEntry) error {
+	pending := make([]string, 0, maxPathDepth)
+	if base := path.Dir(name); base != "." {
+		pending = append(pending, strings.Split(base, "/")...)
 	}
-	e := es[name]
-	target := e.link
-	base := path.Dir(name)
-	cur := path.Clean(path.Join(base, target))
-	if cur == "." || strings.HasPrefix(cur, "../") || cur == ".." {
-		return "", fmt.Errorf("symlink %q escapes site", name)
-	}
-	parts := strings.Split(cur, "/")
-	for i := 1; i <= len(parts); i++ {
-		prefix := strings.Join(parts[:i], "/")
-		if x, ok := es[prefix]; ok && x.kind == 'l' {
-			resolved, err := resolveArchiveLink(prefix, es, depth+1)
-			if err != nil {
-				return "", err
+	pending = append(pending, strings.Split(entries[name].link, "/")...)
+	resolved := make([]string, 0, maxPathDepth)
+	seen := make(map[string]bool)
+	depth := 0
+	for len(pending) > 0 {
+		part := pending[0]
+		pending = pending[1:]
+		switch part {
+		case "", ".":
+			continue
+		case "..":
+			if len(resolved) == 0 {
+				return fmt.Errorf("symlink %q escapes site", name)
 			}
-			remainder := strings.Join(parts[i:], "/")
-			if remainder == "" {
-				return resolved, nil
-			}
-			return resolveArchivePath(resolved+"/"+remainder, es, depth+1)
+			resolved = resolved[:len(resolved)-1]
+			continue
+		default:
+			resolved = append(resolved, part)
 		}
-	}
-	return cur, nil
-}
-
-func resolveArchivePath(name string, es map[string]archiveEntry, depth int) (string, error) {
-	if depth > maxLinkDepth {
-		return "", errors.New("symlink depth exceeded")
-	}
-	clean := path.Clean(name)
-	if clean == "." || clean == ".." || strings.HasPrefix(clean, "../") {
-		return "", errors.New("symlink escapes site")
-	}
-	parts := strings.Split(clean, "/")
-	for i := 1; i <= len(parts); i++ {
-		prefix := strings.Join(parts[:i], "/")
-		if x, ok := es[prefix]; ok && x.kind == 'l' {
-			resolved, err := resolveArchiveLink(prefix, es, depth+1)
-			if err != nil {
-				return "", err
-			}
-			remainder := strings.Join(parts[i:], "/")
-			if remainder == "" {
-				return resolved, nil
-			}
-			return resolveArchivePath(resolved+"/"+remainder, es, depth+1)
+		if len(resolved) > maxPathDepth {
+			return fmt.Errorf("symlink %q is too deep", name)
 		}
+		current := strings.Join(resolved, "/")
+		entry, ok := entries[current]
+		if !ok {
+			continue
+		}
+		if entry.kind == archiveEntryRegular && len(pending) > 0 {
+			return fmt.Errorf("symlink %q enters a file", name)
+		}
+		if entry.kind != archiveEntrySymlink {
+			continue
+		}
+		depth++
+		if depth > maxLinkDepth || seen[current] {
+			return fmt.Errorf("symlink %q loops or exceeds depth", name)
+		}
+		seen[current] = true
+		resolved = resolved[:len(resolved)-1]
+		pending = append(strings.Split(entry.link, "/"), pending...)
 	}
-	return clean, nil
+	return nil
 }

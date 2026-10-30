@@ -14,6 +14,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 )
@@ -352,6 +353,58 @@ func TestPublishFailureRetainsConfirmedContent(t *testing.T) {
 	}
 }
 
+func TestDeploymentFailureReportsAfterStoreFailureAndCancellation(t *testing.T) {
+	root, err := url.Parse("http://pages.example.test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var report deploymentResult
+	reportServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/api/internal/pages/results" {
+			http.NotFound(w, r)
+			return
+		}
+		if err := json.NewDecoder(r.Body).Decode(&report); err != nil {
+			t.Errorf("decode report: %v", err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusServiceUnavailable)
+		_ = json.NewEncoder(w).Encode(map[string]string{"code": "report_failed"})
+	}))
+	defer reportServer.Close()
+	giteaURL, err := url.Parse(reportServer.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store, err := openStore(t.TempDir(), defaultEtcdQuotaBytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.close()
+	targetSite := site{RepoID: 1, Enabled: true, OwnerName: "alice", RepoName: "docs", PagesUpdatedUnixNano: 1}
+	setTestSites(t, store, root.String(), 1, []site{targetSite})
+	store.kv.etcd.Server.Stop()
+
+	cfg := Config{GiteaURL: giteaURL, RootURL: root, Token: "test", DeployQueueSize: 1, DeployConcurrency: 1}
+	syncer := newSyncer(cfg, newTestGiteaClient(cfg), store, &testPublisher{}, slog.Default())
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	err = syncer.reportDeploymentFailure(ctx, targetSite, instanceErrorContentInstallFailed, errors.New("disk full"))
+	if err == nil {
+		t.Fatal("deployment failure did not retain the local storage error")
+	}
+	if !strings.Contains(err.Error(), "save deployment failure") {
+		t.Fatalf("deployment failure did not retain the local storage error: %v", err)
+	}
+	var apiErr *apiError
+	if !errors.As(err, &apiErr) || apiErr.Code != "report_failed" {
+		t.Fatalf("deployment failure did not retain the report error: %v", err)
+	}
+	if report.RepoID != targetSite.RepoID || report.ConfigApplied || report.DefaultPublished || report.CustomPublished || report.ErrorCode != instanceErrorContentInstallFailed {
+		t.Fatalf("unexpected failure report: %#v", report)
+	}
+}
+
 func TestCustomDomainTXTGrace(t *testing.T) {
 	store, err := openStore(t.TempDir(), defaultEtcdQuotaBytes)
 	if err != nil {
@@ -365,7 +418,7 @@ func TestCustomDomainTXTGrace(t *testing.T) {
 	}
 	now := time.Now()
 	domain := domain{
-		ID: 1, Host: "docs.example.test", TXTToken: "token", TXTResult: domaintxtInvalid,
+		ID: 1, Host: "docs.example.test", TXTToken: "token", TXTResult: "invalid",
 		TXTLastSuccessUnixNano: now.Add(-time.Hour).UnixNano(),
 	}
 	key := "1/docs.example.test/token"
@@ -389,7 +442,7 @@ func TestCustomDomainTXTGrace(t *testing.T) {
 		t.Fatalf("expired Gitea TXT authorization remained active: ready=%v err=%v", ready, err)
 	}
 
-	domain.TXTResult = domaintxtValid
+	domain.TXTResult = domainTXTValid
 	domain.TXTLastSuccessUnixNano = now.UnixNano()
 	if err := store.setTXTState(key, txtState{
 		LastSuccessUnixNano: now.Add(time.Hour).UnixNano(), LastCheckUnixNano: now.Add(time.Hour).UnixNano(),

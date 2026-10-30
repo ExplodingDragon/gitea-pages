@@ -38,12 +38,7 @@ type domain struct {
 // domainTXTResult is Gitea's latest ownership-check result for a custom domain.
 type domainTXTResult string
 
-const (
-	domainTXTPending        domainTXTResult = "pending"
-	domaintxtValid          domainTXTResult = "valid"
-	domaintxtInvalid        domainTXTResult = "invalid"
-	domaintxtTemporaryError domainTXTResult = "temporary_error"
-)
+const domainTXTValid domainTXTResult = "valid"
 
 // archiveLimits are the content bounds configured by Gitea for new deployments.
 type archiveLimits struct {
@@ -79,7 +74,7 @@ const (
 	instanceErrorContentInvalid        instanceErrorCode = "content_invalid"
 	instanceErrorContentInstallFailed  instanceErrorCode = "content_install_failed"
 	instanceErrorRouteApplyFailed      instanceErrorCode = "route_apply_failed"
-	instanceErrortxtInvalid            instanceErrorCode = "txt_invalid"
+	instanceErrorTXTInvalid            instanceErrorCode = "txt_invalid"
 	instanceErrorACMEFailed            instanceErrorCode = "acme_failed"
 	instanceErrorEntryProbeFailed      instanceErrorCode = "entry_probe_failed"
 )

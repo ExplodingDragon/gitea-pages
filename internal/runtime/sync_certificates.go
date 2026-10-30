@@ -126,7 +126,7 @@ func (s *syncer) customDomainAuthorized(ctx context.Context, site site) (bool, e
 	now := time.Now()
 	lastGiteaSuccess := time.Unix(0, domain.TXTLastSuccessUnixNano)
 	withinGiteaGrace := domain.TXTLastSuccessUnixNano != 0 && !lastGiteaSuccess.After(now) && now.Sub(lastGiteaSuccess) < txtAuthorizationGracePeriod
-	if domain.TXTResult != domaintxtValid && !withinGiteaGrace {
+	if domain.TXTResult != domainTXTValid && !withinGiteaGrace {
 		return false, fmt.Errorf("domain %s is not authorized by Gitea", domain.Host)
 	}
 	key := fmt.Sprintf("%d/%s/%s", domain.ID, domain.Host, domain.TXTToken)

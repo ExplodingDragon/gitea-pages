@@ -32,8 +32,11 @@ func (s *syncer) deploySite(ctx context.Context, repoID int64) error {
 			return s.reportDeploymentFailure(ctx, site, instanceErrorContentInstallFailed, err)
 		}
 		applied, err := s.store.saveDeploymentResult(site, "", false, false)
-		if err != nil || !applied {
-			return err
+		if err != nil {
+			return s.reportDeploymentFailure(ctx, site, instanceErrorContentInstallFailed, err)
+		}
+		if !applied {
+			return nil
 		}
 		return s.reportResult(ctx, site, "", true, false, false, "")
 	}
@@ -87,13 +90,13 @@ func (s *syncer) deploySite(ctx context.Context, repoID int64) error {
 }
 
 func (s *syncer) publishSite(ctx context.Context, site site, content Content) error {
-	customDomainPublished, customErr := s.customDomainAuthorized(ctx, site)
+	customDomainReady, customErr := s.customDomainAuthorized(ctx, site)
 	var errorCode instanceErrorCode
 	if customErr != nil {
-		errorCode = instanceErrortxtInvalid
+		errorCode = instanceErrorTXTInvalid
 	}
 	certChanged := false
-	if customDomainPublished {
+	if customDomainReady {
 		if publisher, ok := s.publisher.(managedCertificatePublisher); ok && site.CustomDomain != nil {
 			if err := publisher.prepareCustomDomain(ctx, site.CustomDomain.Host); err != nil {
 				return s.reportDeploymentFailure(ctx, site, instanceErrorRouteApplyFailed, err)
@@ -101,9 +104,9 @@ func (s *syncer) publishSite(ctx context.Context, site site, content Content) er
 		}
 		if renewed, err := s.ensureCustomCertificate(ctx, site); err != nil {
 			certChanged = renewed
-			customDomainPublished = s.certificates == nil || s.cfg.RootURL.Scheme != "https" ||
+			customDomainReady = s.certificates == nil || s.cfg.RootURL.Scheme != "https" ||
 				site.CustomDomain == nil || s.certificates.hasUsable(site.CustomDomain.Host)
-			if customDomainPublished {
+			if customDomainReady {
 				errorCode = instanceErrorACMEFailed
 			} else {
 				errorCode = instanceErrorCertificatePending
@@ -120,7 +123,7 @@ func (s *syncer) publishSite(ctx context.Context, site site, content Content) er
 			}
 		}
 	}
-	deployment, err := deploymentForSite(s.cfg, site, content, customDomainPublished)
+	deployment, err := deploymentForSite(s.cfg, site, content, customDomainReady)
 	if err != nil {
 		return s.reportDeploymentFailure(ctx, site, instanceErrorRouteApplyFailed, err)
 	}
@@ -139,9 +142,12 @@ func (s *syncer) publishSite(ctx context.Context, site site, content Content) er
 			errorCode = instanceErrorEntryProbeFailed
 		}
 	}
-	current, err := s.store.saveDeploymentResult(site, site.TarGzSHA256, publication.DefaultPublished, publication.CustomPublished)
-	if err != nil || !current {
-		return err
+	applied, err := s.store.saveDeploymentResult(site, site.TarGzSHA256, publication.DefaultPublished, publication.CustomPublished)
+	if err != nil {
+		return s.reportDeploymentFailure(ctx, site, instanceErrorContentInstallFailed, err)
+	}
+	if !applied {
+		return nil
 	}
 	if err := s.store.cleanupOldContent(site.RepoID, site.TarGzSHA256); err != nil {
 		s.logger.Error("cleaning old Pages content failed", "repo_id", site.RepoID, "error", err)
@@ -263,16 +269,15 @@ func (s *syncer) scanPendingSites(ctx context.Context) {
 func (s *syncer) reportDeploymentFailure(ctx context.Context, site site, code instanceErrorCode, cause error) error {
 	local, _ := s.store.getSite(site.RepoID)
 	applied, err := s.store.saveDeploymentResult(site, local.InstalledDigest, local.DefaultPublished, local.CustomPublished)
-	if err != nil {
-		return errors.Join(fmt.Errorf("%s: %w", code, cause), fmt.Errorf("save deployment failure: %w", err))
-	}
-	if !applied {
+	if err == nil && !applied {
 		return nil
 	}
-	if reportErr := s.reportResult(ctx, site, local.InstalledDigest, false, false, false, code); reportErr != nil {
-		return errors.Join(fmt.Errorf("%s: %w", code, cause), reportErr)
+	var saveErr error
+	if err != nil {
+		saveErr = fmt.Errorf("save deployment failure: %w", err)
 	}
-	return fmt.Errorf("%s: %w", code, cause)
+	reportErr := s.reportResult(context.WithoutCancel(ctx), site, local.InstalledDigest, false, false, false, code)
+	return errors.Join(fmt.Errorf("%s: %w", code, cause), saveErr, reportErr)
 }
 
 func (s *syncer) reportResult(ctx context.Context, site site, digest string, configApplied, defaultPublished, customPublished bool, errorCode instanceErrorCode) error {
@@ -286,6 +291,9 @@ func (s *syncer) reportResult(ctx context.Context, site site, digest string, con
 		AppliedRequireGiteaTXTRecord: requireGiteaTXT, ConfigApplied: configApplied, ActualTarGzSHA256: digest,
 		DefaultPublished: defaultPublished, CustomPublished: customPublished, ErrorCode: errorCode,
 	}
+	reportAfterStoreError := func(storeErr error) error {
+		return errors.Join(storeErr, s.client.reportResult(context.WithoutCancel(ctx), result))
+	}
 	if old, ok := s.store.pendingReport(site.RepoID); ok {
 		err := s.client.reportResult(ctx, old)
 		var apiErr *apiError
@@ -293,20 +301,20 @@ func (s *syncer) reportResult(ctx context.Context, site site, digest string, con
 			return err
 		}
 		if clearErr := s.store.clearPendingReport(site.RepoID, old); clearErr != nil {
-			return clearErr
+			return reportAfterStoreError(clearErr)
 		}
 		if err != nil {
 			return err
 		}
 		if err := s.store.markConfirmedReport(old); err != nil {
-			return err
+			return reportAfterStoreError(err)
 		}
 		if old == result {
 			return nil
 		}
 	}
 	if err := s.store.savePendingReport(result); err != nil {
-		return err
+		return reportAfterStoreError(err)
 	}
 	if err := s.client.reportResult(ctx, result); err != nil {
 		var apiErr *apiError

@@ -36,7 +36,7 @@ flowchart LR
     P --> C[custom Publisher]
 ```
 
-Gitea remains the control plane and artifact source. Each Pages instance independently deploys every enabled site and keeps its own local state. Instances do not form an etcd cluster and Gitea does not assign repositories to individual instances.
+Gitea remains the control plane and artifact source. Each Pages instance independently deploys every enabled site, owns its embedded etcd state, and receives the same repository facts from Gitea.
 
 ## Requirements
 
@@ -59,7 +59,7 @@ make build
 ./bin/gitea-pages --help
 ```
 
-The binary is written to `bin/gitea-pages`. The project does not require a separately managed etcd service.
+The binary is written to `bin/gitea-pages`. Each process starts its embedded etcd storage from the configured data root.
 
 ## Quick start
 
@@ -272,7 +272,7 @@ Archive limits and the custom-domain ownership requirement come from Gitea durin
 
 Publication artifacts are untrusted input. Gitea validates each upload before storage, and Pages validates it again during extraction. The checks cover compressed input bounds, expanded size, entry count, path length and depth, absolute and traversal paths, duplicate normalized names, unsafe entry types, link resolution, extraction timeout, and final filesystem contents.
 
-Relative symbolic links are accepted when their resolved path remains inside the site directory, including links whose target is absent from the artifact. Absolute links, escaping links, hard links, devices, sockets, and other special entries fail the deployment. Regular files are published without executable permission bits.
+Relative symbolic links are accepted when their resolved path remains inside the site directory, including the site root and targets absent from the artifact. Absolute links, escaping links, hard links, devices, sockets, and other special entries fail the deployment. Regular files are published without executable permission bits.
 
 Custom-domain ownership can be enforced independently by Gitea and each Pages instance. After a successful TXT check, an existing route receives a 24-hour grace period for later mismatches or resolver failures. A new domain becomes eligible only after its first successful check. Pages also verifies local HTTP-01 reachability before creating an ACME order, which reduces avoidable CA rate-limit failures.
 

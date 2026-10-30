@@ -57,7 +57,10 @@ func NewService(cfg Config, publisher Publisher, options ...Option) (*Service, e
 			return nil, err
 		}
 		service.certificates = certificates
-		service.syncer.setCertificateServices(certificates, acme, cfg.HTTP01ProbeAddresses, managed)
+		service.syncer.certificates = certificates
+		service.syncer.acme = acme
+		service.syncer.http01Addresses = cfg.HTTP01ProbeAddresses
+		service.syncer.challengeResponder = managed
 	}
 	return service, nil
 }

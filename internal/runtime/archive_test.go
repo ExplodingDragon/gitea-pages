@@ -72,8 +72,12 @@ func makeArchive(t *testing.T, entries ...testTarEntry) *os.File {
 	return f
 }
 
-func TestExtractTarGzSanitizesFilesAndAcceptsMissingInRootSymlink(t *testing.T) {
-	f := makeArchive(t, testTarEntry{name: "index.html", kind: tar.TypeReg, body: "ok", mode: 0o755}, testTarEntry{name: "assets/logo", kind: tar.TypeSymlink, link: "../missing/logo"})
+func TestExtractTarGzPreservesSafeFilesAndSymlinks(t *testing.T) {
+	f := makeArchive(t,
+		testTarEntry{name: "index.html", kind: tar.TypeReg, body: "ok", mode: 0o755},
+		testTarEntry{name: "assets/logo", kind: tar.TypeSymlink, link: "../missing/logo"},
+		testTarEntry{name: "root", kind: tar.TypeSymlink, link: "."},
+	)
 	defer func() { _ = f.Close() }()
 	target := filepath.Join(t.TempDir(), "site")
 	if err := extractTarGz(t.Context(), f, target, testArchiveLimits()); err != nil {
@@ -93,11 +97,18 @@ func TestExtractTarGzSanitizesFilesAndAcceptsMissingInRootSymlink(t *testing.T) 
 	if link != "../missing/logo" {
 		t.Fatalf("link = %q", link)
 	}
+	link, err = os.Readlink(filepath.Join(target, "root"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if link != "." {
+		t.Fatalf("root link = %q", link)
+	}
 	entries, err := os.ReadDir(target)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(entries) != 2 || entries[0].Name() != "assets" || entries[1].Name() != "index.html" {
+	if len(entries) != 3 || entries[0].Name() != "assets" || entries[1].Name() != "index.html" || entries[2].Name() != "root" {
 		t.Fatalf("extracted entries = %v", entries)
 	}
 }
@@ -122,32 +133,17 @@ func TestExtractTarGzUsesSynchronizedLimits(t *testing.T) {
 	}
 }
 
-func TestExtractTarGzRejectsEscapeAndReservedPath(t *testing.T) {
-	for _, name := range []string{"../index.html", ".gitea-pages-probe/evil"} {
-		t.Run(name, func(t *testing.T) {
-			f := makeArchive(t, testTarEntry{name: name, kind: tar.TypeReg, body: "bad"})
-			defer func() { _ = f.Close() }()
-			err := extractTarGz(t.Context(), f, filepath.Join(t.TempDir(), "site"), testArchiveLimits())
-			if err == nil {
-				t.Fatal("expected archive rejection")
-			}
-		})
-	}
-	f := makeArchive(t,
-		testTarEntry{name: "outside", kind: tar.TypeSymlink, link: "../../outside"},
-		testTarEntry{name: "outside/file.txt", kind: tar.TypeReg, body: "bad"},
-	)
-	defer func() { _ = f.Close() }()
-	if err := extractTarGz(t.Context(), f, filepath.Join(t.TempDir(), "site"), testArchiveLimits()); err == nil {
-		t.Fatal("expected symlink parent rejection")
-	}
-}
-
-func TestExtractTarGzRejectsUnsafeArchiveDetails(t *testing.T) {
+func TestExtractTarGzRejectsUnsafeEntries(t *testing.T) {
 	tests := []struct {
 		name    string
 		entries []testTarEntry
 	}{
+		{name: "path escapes root", entries: []testTarEntry{
+			{name: "../index.html", kind: tar.TypeReg, body: "bad"},
+		}},
+		{name: "reserved path", entries: []testTarEntry{
+			{name: ".gitea-pages-probe/evil", kind: tar.TypeReg, body: "bad"},
+		}},
 		{name: "case collision", entries: []testTarEntry{
 			{name: "index.html", kind: tar.TypeReg, body: "ok"},
 			{name: "INDEX.HTML", kind: tar.TypeReg, body: "same"},
@@ -180,6 +176,23 @@ func TestExtractTarGzRejectsUnsafeArchiveDetails(t *testing.T) {
 		{name: "file parent", entries: []testTarEntry{
 			{name: "assets", kind: tar.TypeReg, body: "file"},
 			{name: "assets/logo", kind: tar.TypeReg, body: "bad"},
+		}},
+		{name: "symlink parent", entries: []testTarEntry{
+			{name: "assets", kind: tar.TypeSymlink, link: "target"},
+			{name: "assets/logo", kind: tar.TypeReg, body: "bad"},
+		}},
+		{name: "symlink enters file", entries: []testTarEntry{
+			{name: "index.html", kind: tar.TypeReg, body: "ok"},
+			{name: "asset", kind: tar.TypeSymlink, link: "index.html/child"},
+		}},
+		{name: "symlink escapes root", entries: []testTarEntry{
+			{name: "index.html", kind: tar.TypeReg, body: "ok"},
+			{name: "asset", kind: tar.TypeSymlink, link: "../outside"},
+		}},
+		{name: "symlink loop", entries: []testTarEntry{
+			{name: "index.html", kind: tar.TypeReg, body: "ok"},
+			{name: "a", kind: tar.TypeSymlink, link: "b"},
+			{name: "b", kind: tar.TypeSymlink, link: "a"},
 		}},
 	}
 	for _, tt := range tests {
@@ -264,7 +277,7 @@ func TestExtractTarGzRejectsNonZeroTarTail(t *testing.T) {
 }
 
 func TestBoundedArchiveReaderRejectsOversizedTarData(t *testing.T) {
-	r := &boundedArchiveReader{r: strings.NewReader("abcdef"), limit: 3}
+	r := &boundedArchiveReader{ctx: t.Context(), r: strings.NewReader("abcdef"), limit: 3}
 	buf := make([]byte, 3)
 	if n, err := r.Read(buf); n != 3 || err != nil {
 		t.Fatalf("first read = %d, %v", n, err)

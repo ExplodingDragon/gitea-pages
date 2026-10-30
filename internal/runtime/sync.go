@@ -43,13 +43,6 @@ type syncer struct {
 	scanRequested         chan struct{}
 }
 
-func (s *syncer) setCertificateServices(certificates *certificateManager, acme *acmeManager, probeAddresses []string, responder challengeResponder) {
-	s.certificates = certificates
-	s.acme = acme
-	s.http01Addresses = probeAddresses
-	s.challengeResponder = responder
-}
-
 func newSyncer(cfg Config, client *giteaClient, store *store, publisher Publisher, logger *slog.Logger) *syncer {
 	cfg.applyDefaults()
 	resolver := newDNSResolver(cfg.DNSResolver)

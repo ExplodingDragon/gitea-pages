@@ -494,11 +494,7 @@ func (p *NginxPublisher) apply(ctx context.Context) error {
 	return nil
 }
 
-// cleanupSnapshots removes only Pages-generated snapshot directories that are
-// no longer current. A cleanup error is deliberately reported and ignored:
-// the new configuration has already passed nginx's checks and reload, so a
-// housekeeping failure must not turn a successful publication into an error.
-// The next Apply retries the same cleanup, including the no-change path above.
+// cleanupSnapshots logs cleanup errors after activation; the next apply retries them.
 func (p *NginxPublisher) cleanupSnapshots(currentDigest string) {
 	root := filepath.Join(p.cfg.NginxRoot, "config", "snapshots")
 	entries, err := os.ReadDir(root)
