@@ -224,6 +224,8 @@ Files not supplied by the custom root continue to use their bundled versions. Pl
 
 The root package exposes the synchronization service and the publication boundary while keeping protocol, storage, etcd, certificate, and ACME records internal.
 
+Command integrations can call `page.LoadConfig(page.ModeStandalone)` or `page.LoadConfig(page.ModeNginx)` to read the matching environment variables. Library integrations may construct `page.Config` directly; the selected built-in publisher uses its own listener or Nginx probe addresses, while a custom publisher owns its own entry point.
+
 ```go
 import page "gitea.dev/page"
 

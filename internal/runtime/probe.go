@@ -17,11 +17,7 @@ import (
 	"time"
 )
 
-func probeDeploymentURL(ctx context.Context, cfg Config, target url.URL, repoID int64, digest string) error {
-	address, err := probeAddress(cfg)
-	if err != nil {
-		return err
-	}
+func probeDeploymentURL(ctx context.Context, address string, target url.URL, repoID int64, digest string) error {
 	base := target.Path
 	if base == "" {
 		base = "/"
@@ -36,31 +32,8 @@ func probeDeploymentURL(ctx context.Context, cfg Config, target url.URL, repoID 
 	return probeHTTP(ctx, target.Scheme, address, target.Hostname(), path, http.StatusOK, strconv.FormatInt(repoID, 10)+" "+digest+"\n")
 }
 
-func probePlatform(ctx context.Context, cfg Config) error {
-	var address string
-	if cfg.Mode == ModeNginx {
-		address = cfg.NginxHTTPProbeAddr
-	} else {
-		var err error
-		address, err = localListenAddress(cfg.HTTPListen)
-		if err != nil {
-			return err
-		}
-	}
-	return probeHTTP(ctx, "http", address, cfg.RootURL.Hostname(), "/@gitea-pages/ready", http.StatusNoContent, "")
-}
-
-func probeAddress(cfg Config) (string, error) {
-	if cfg.Mode == ModeNginx {
-		if cfg.RootURL.Scheme == "https" {
-			return cfg.NginxHTTPSProbeAddr, nil
-		}
-		return cfg.NginxHTTPProbeAddr, nil
-	}
-	if cfg.RootURL.Scheme == "https" {
-		return localListenAddress(cfg.HTTPSListen)
-	}
-	return localListenAddress(cfg.HTTPListen)
+func probePlatform(ctx context.Context, address, host string) error {
+	return probeHTTP(ctx, "http", address, host, "/@gitea-pages/ready", http.StatusNoContent, "")
 }
 
 func localListenAddress(listen string) (string, error) {

@@ -57,7 +57,6 @@ func NewStandalonePublisher(cfg Config) (*StandalonePublisher, error) {
 	if cfg.RootURL == nil || cfg.RootURL.Hostname() == "" || cfg.RootURL.Scheme != "http" && cfg.RootURL.Scheme != "https" {
 		return nil, errors.New("pages root URL must use HTTP or HTTPS")
 	}
-	cfg.Mode = ModeStandalone
 	resources, err := loadPlatformResources(cfg.CustomRoot)
 	if err != nil {
 		return nil, err
@@ -167,18 +166,31 @@ func (s *StandalonePublisher) Publish(ctx context.Context, deployment Deployment
 		}
 		s.routeIndex.mu.Unlock()
 	}
-	if err := probePlatform(ctx, s.cfg); err != nil {
+	httpAddress, err := localListenAddress(s.cfg.HTTPListen)
+	if err != nil {
 		restore()
 		return Publication{}, err
 	}
+	if err := probePlatform(ctx, httpAddress, s.root.Hostname()); err != nil {
+		restore()
+		return Publication{}, err
+	}
+	deploymentAddress := httpAddress
+	if s.root.Scheme == "https" {
+		deploymentAddress, err = localListenAddress(s.cfg.HTTPSListen)
+		if err != nil {
+			restore()
+			return Publication{}, err
+		}
+	}
 	result := Publication{}
-	if err := probeDeploymentURL(ctx, s.cfg, deployment.DefaultURL, deployment.RepositoryID, deployment.Content.Digest()); err == nil {
+	if err := probeDeploymentURL(ctx, deploymentAddress, deployment.DefaultURL, deployment.RepositoryID, deployment.Content.Digest()); err == nil {
 		result.DefaultPublished = true
 	} else {
 		result.Problem = PublicationProblemEntryProbeFailed
 	}
 	if deployment.CustomURL != nil {
-		if err := probeDeploymentURL(ctx, s.cfg, *deployment.CustomURL, deployment.RepositoryID, deployment.Content.Digest()); err == nil {
+		if err := probeDeploymentURL(ctx, deploymentAddress, *deployment.CustomURL, deployment.RepositoryID, deployment.Content.Digest()); err == nil {
 			result.CustomPublished = true
 		} else {
 			result.Problem = PublicationProblemEntryProbeFailed

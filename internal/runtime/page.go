@@ -32,11 +32,11 @@ const (
 	defaultDNSRefreshInterval = 15 * time.Minute
 )
 
-// Config contains the settings shared by both Pages processes. Values come
-// from the environment so a service manager can keep deployment-specific
-// addresses and credentials out of the binary.
+// Config contains the synchronization and publication settings used by the
+// service and built-in publishers. Values come from the environment so a
+// service manager can keep deployment-specific addresses and credentials out
+// of the binary.
 type Config struct {
-	Mode                 Mode
 	GiteaURL             *url.URL
 	Token                string
 	RootURL              *url.URL
@@ -131,7 +131,9 @@ func (cfg Config) Validate() error {
 // LoadConfig reads and validates the environment for one serving mode.
 func LoadConfig(mode Mode) (Config, error) {
 	var cfg Config
-	cfg.Mode = mode
+	if mode != ModeStandalone && mode != ModeNginx {
+		return cfg, fmt.Errorf("unsupported Pages mode %q", mode)
+	}
 	var err error
 	cfg.GiteaURL, err = requiredURL("GITEA_PAGES_GITEA_URL")
 	if err != nil {

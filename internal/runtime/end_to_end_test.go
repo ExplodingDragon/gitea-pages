@@ -111,7 +111,6 @@ func TestSyncDeployAndServe(t *testing.T) {
 		t.Fatal(err)
 	}
 	cfg := Config{
-		Mode:              ModeStandalone,
 		GiteaURL:          giteaURL,
 		RootURL:           rootURL,
 		Token:             "page-token",

@@ -34,7 +34,6 @@ func NewNginxPublisher(cfg Config) (*NginxPublisher, error) {
 	if cfg.RootURL == nil || cfg.RootURL.Hostname() == "" || cfg.RootURL.Scheme != "http" && cfg.RootURL.Scheme != "https" {
 		return nil, errors.New("pages root URL must use HTTP or HTTPS")
 	}
-	cfg.Mode = ModeNginx
 	if !filepath.IsAbs(cfg.DataRoot) || !filepath.IsAbs(cfg.NginxRoot) {
 		return nil, errors.New("pages data and Nginx roots must be absolute paths")
 	}
@@ -257,17 +256,21 @@ func (p *NginxPublisher) Publish(ctx context.Context, deployment Deployment) (Pu
 	if err := p.apply(ctx); err != nil {
 		return Publication{}, rollback(err)
 	}
-	if err := probePlatform(ctx, p.cfg); err != nil {
+	if err := probePlatform(ctx, p.cfg.NginxHTTPProbeAddr, p.cfg.RootURL.Hostname()); err != nil {
 		return Publication{}, rollback(err)
 	}
+	deploymentAddress := p.cfg.NginxHTTPProbeAddr
+	if p.cfg.RootURL.Scheme == "https" {
+		deploymentAddress = p.cfg.NginxHTTPSProbeAddr
+	}
 	result := Publication{}
-	if err := probeDeploymentURL(ctx, p.cfg, deployment.DefaultURL, deployment.RepositoryID, deployment.Content.Digest()); err == nil {
+	if err := probeDeploymentURL(ctx, deploymentAddress, deployment.DefaultURL, deployment.RepositoryID, deployment.Content.Digest()); err == nil {
 		result.DefaultPublished = true
 	} else {
 		result.Problem = PublicationProblemEntryProbeFailed
 	}
 	if deployment.CustomURL != nil {
-		if err := probeDeploymentURL(ctx, p.cfg, *deployment.CustomURL, deployment.RepositoryID, deployment.Content.Digest()); err == nil {
+		if err := probeDeploymentURL(ctx, deploymentAddress, *deployment.CustomURL, deployment.RepositoryID, deployment.Content.Digest()); err == nil {
 			result.CustomPublished = true
 		} else {
 			result.Problem = PublicationProblemEntryProbeFailed

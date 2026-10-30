@@ -9,6 +9,12 @@ import (
 	"time"
 )
 
+func TestLoadConfigRejectsUnknownMode(t *testing.T) {
+	if _, err := LoadConfig(Mode("unknown")); err == nil {
+		t.Fatal("unknown serving mode was accepted")
+	}
+}
+
 func TestLoadConfigValidatesInstanceStorageAndAddress(t *testing.T) {
 	dataRoot := filepath.Join(t.TempDir(), "pages")
 	t.Setenv("GITEA_PAGES_GITEA_URL", "http://gitea.example.test")

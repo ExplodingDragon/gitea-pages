@@ -12,7 +12,7 @@ import (
 	"gitea.dev/page/internal/runtime"
 )
 
-// Mode selects one of the built-in publishers used by the command.
+// Mode selects the built-in publisher environment read by LoadConfig.
 type Mode = runtime.Mode
 
 const (

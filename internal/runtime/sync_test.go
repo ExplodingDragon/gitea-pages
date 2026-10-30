@@ -329,7 +329,7 @@ func TestPublishFailureRetainsConfirmedContent(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	cfg := Config{GiteaURL: giteaURL, RootURL: root, Token: "test", Mode: ModeStandalone, DeployQueueSize: 1, DeployConcurrency: 1}
+	cfg := Config{GiteaURL: giteaURL, RootURL: root, Token: "test", DeployQueueSize: 1, DeployConcurrency: 1}
 	syncer := newSyncer(cfg, newTestGiteaClient(cfg), store, &testPublisher{publishErr: errors.New("publish failed")}, slog.Default())
 	if err := syncer.publishSite(context.Background(), targetSite, content); err == nil {
 		t.Fatal("publish unexpectedly succeeded")
