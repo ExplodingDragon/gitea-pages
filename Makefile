@@ -3,7 +3,7 @@ GO ?= go
 .PHONY: build check test format format-check tidy
 
 build:
-	$(GO) build -o bin/gitea-pages ./cmd/gitea-pages
+	$(GO) build -o bin/gitea-pages ./cmd
 
 check:
 	$(MAKE) format-check

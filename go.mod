@@ -5,6 +5,7 @@ go 1.27
 require (
 	github.com/go-acme/lego/v5 v5.6.0
 	github.com/miekg/dns v1.1.73
+	github.com/spf13/cobra v1.10.2
 	go.etcd.io/etcd/api/v3 v3.7.3
 	go.etcd.io/etcd/server/v3 v3.7.3
 	golang.org/x/text v0.43.0
@@ -29,6 +30,7 @@ require (
 	github.com/grpc-ecosystem/go-grpc-middleware/v2 v2.3.4 // indirect
 	github.com/grpc-ecosystem/grpc-gateway/v2 v2.33.0 // indirect
 	github.com/hashicorp/go-uuid v1.0.4 // indirect
+	github.com/inconshreveable/mousetrap v1.1.0 // indirect
 	github.com/jonboulle/clockwork v0.5.0 // indirect
 	github.com/munnerz/goautoneg v0.0.0-20191010083416-a7dc8b61c822 // indirect
 	github.com/pandatix/go-abnf v0.5.1 // indirect
