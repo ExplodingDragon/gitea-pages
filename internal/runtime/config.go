@@ -134,7 +134,7 @@ func (raw fileConfig) runtimeConfig() (Config, error) {
 	if raw.Storage.EtcdQuotaBytes != nil {
 		cfg.EtcdQuotaBytes = *raw.Storage.EtcdQuotaBytes
 	}
-	cfg.DNSResolver, err = configDNSResolver("domains.resolver", raw.Domains.Resolver)
+	cfg.DNSResolver, err = parseDNSResolverAddress("domains.resolver", raw.Domains.Resolver)
 	if err != nil {
 		return cfg, err
 	}
@@ -153,7 +153,7 @@ func (raw fileConfig) runtimeConfig() (Config, error) {
 			return cfg, errors.New("server.https.acme.eab.hmac_key must be a base64url HMAC key")
 		}
 	}
-	cfg.ACMEDNSResolver, err = configDNSResolver("server.https.acme.dns01.resolver", acme.DNS01.Resolver)
+	cfg.ACMEDNSResolver, err = parseDNSResolverAddress("server.https.acme.dns01.resolver", acme.DNS01.Resolver)
 	if err != nil {
 		return cfg, err
 	}
@@ -191,7 +191,7 @@ func configDuration(name, value string, fallback time.Duration) (time.Duration, 
 	return d, nil
 }
 
-func configDNSResolver(name, value string) (string, error) {
+func parseDNSResolverAddress(name, value string) (string, error) {
 	value = strings.TrimSpace(value)
 	if value == "" {
 		return "", nil

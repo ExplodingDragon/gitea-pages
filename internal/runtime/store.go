@@ -187,7 +187,7 @@ func openStore(root string, quotaBytes int64) (*store, error) {
 	}
 	for repoID, local := range s.state.sites {
 		changed := false
-		if local.InstalledDigest != "" && !s.installedMatches(local.Site.RepoID, local.InstalledDigest) {
+		if local.InstalledDigest != "" && !s.hasInstalledContent(local.Site.RepoID, local.InstalledDigest) {
 			local.InstalledDigest = ""
 			local.DefaultPublished = false
 			local.CustomPublished = false
@@ -212,7 +212,7 @@ func openStore(root string, quotaBytes int64) (*store, error) {
 				return nil, err
 			}
 		}
-		_ = s.cleanupOldContent(local.Site.RepoID, local.InstalledDigest)
+		_ = s.cleanupSupersededContent(local.Site.RepoID, local.InstalledDigest)
 	}
 	if !fullSyncMarkerPresent {
 		_ = s.cleanupUntrackedContent()
@@ -325,7 +325,7 @@ func (s *store) replaceSites(rootURL string, rootTime, cursor int64, sites []sit
 	next := make(map[int64]localSite, len(sites))
 	for _, site := range sites {
 		local := previous[site.RepoID]
-		if local.Site.RepoID != 0 && routeStateChanged(local.Site, site) {
+		if local.Site.RepoID != 0 && publicationRouteChanged(local.Site, site) {
 			local.DefaultPublished = false
 			local.CustomPublished = false
 		}
@@ -398,7 +398,7 @@ func (s *store) upsertSite(site site) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	old := s.state.sites[site.RepoID]
-	if old.Site.RepoID != 0 && routeStateChanged(old.Site, site) {
+	if old.Site.RepoID != 0 && publicationRouteChanged(old.Site, site) {
 		old.DefaultPublished = false
 		old.CustomPublished = false
 	}
@@ -439,7 +439,7 @@ func (s *store) saveDeploymentResult(site site, digest string, defaultPublished,
 	if !ok {
 		return false, nil
 	}
-	if v.Site.PagesUpdatedUnixNano != site.PagesUpdatedUnixNano || v.Site.TarGzSHA256 != site.TarGzSHA256 || routeStateChanged(v.Site, site) {
+	if v.Site.PagesUpdatedUnixNano != site.PagesUpdatedUnixNano || v.Site.TarGzSHA256 != site.TarGzSHA256 || publicationRouteChanged(v.Site, site) {
 		return false, nil
 	}
 	v.InstalledDigest, v.DefaultPublished, v.CustomPublished = digest, defaultPublished, customPublished

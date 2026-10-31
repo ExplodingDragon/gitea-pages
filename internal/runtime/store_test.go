@@ -34,7 +34,7 @@ func TestStorePersistsPerSiteStateAndPendingReport(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(candidate, "index.html"), []byte("page"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	content, err := s.prepareContent(site.RepoID, site.TarGzSHA256, candidate)
+	content, err := s.installContent(site.RepoID, site.TarGzSHA256, candidate)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -213,7 +213,7 @@ func TestOpenStoreClosesUnconfirmedPublication(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(candidate, "index.html"), []byte("page"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := store.prepareContent(site.RepoID, digest, candidate); err != nil {
+	if _, err := store.installContent(site.RepoID, digest, candidate); err != nil {
 		t.Fatal(err)
 	}
 	if applied, err := store.saveDeploymentResult(site, digest, true, false); err != nil || !applied {

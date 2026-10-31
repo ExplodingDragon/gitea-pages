@@ -28,7 +28,7 @@ func (s *syncer) deploySite(ctx context.Context, repoID int64) error {
 		if err := s.publisher.Unpublish(ctx, site.RepoID); err != nil {
 			return s.reportDeploymentFailure(ctx, site, instanceErrorRouteApplyFailed, err)
 		}
-		if err := s.store.removeContent(site.RepoID); err != nil {
+		if err := s.store.removeInstalledContent(site.RepoID); err != nil {
 			return s.reportDeploymentFailure(ctx, site, instanceErrorContentInstallFailed, err)
 		}
 		applied, err := s.store.saveDeploymentResult(site, "", false, false)
@@ -41,8 +41,8 @@ func (s *syncer) deploySite(ctx context.Context, repoID int64) error {
 		return s.reportResult(ctx, site, "", true, false, false, "")
 	}
 
-	content, prepared := s.store.content(site.RepoID, site.TarGzSHA256)
-	if !prepared {
+	content, installed := s.store.installedContent(site.RepoID, site.TarGzSHA256)
+	if !installed {
 		work, err := s.store.workDir(site.RepoID)
 		if err != nil {
 			return s.reportDeploymentFailure(ctx, site, instanceErrorContentInstallFailed, err)
@@ -81,7 +81,7 @@ func (s *syncer) deploySite(ctx context.Context, repoID int64) error {
 		if !ok || latest.Site.PagesUpdatedUnixNano != site.PagesUpdatedUnixNano || latest.Site.TarGzSHA256 != site.TarGzSHA256 {
 			return nil
 		}
-		content, err = s.store.prepareContent(site.RepoID, site.TarGzSHA256, candidate)
+		content, err = s.store.installContent(site.RepoID, site.TarGzSHA256, candidate)
 		if err != nil {
 			return s.reportDeploymentFailure(ctx, site, instanceErrorContentInstallFailed, err)
 		}
@@ -113,7 +113,7 @@ func (s *syncer) publishSite(ctx context.Context, site site, content Content) er
 	}
 	publication, err := s.publisher.Publish(ctx, deployment)
 	if err != nil {
-		_ = s.store.discardContent(site.RepoID, site.TarGzSHA256)
+		_ = s.store.discardUnpublishedContent(site.RepoID, site.TarGzSHA256)
 		return s.reportDeploymentFailure(ctx, site, instanceErrorRouteApplyFailed, err)
 	}
 	if publication.Problem != "" && errorCode == "" {
@@ -133,8 +133,8 @@ func (s *syncer) publishSite(ctx context.Context, site site, content Content) er
 	if !applied {
 		return nil
 	}
-	if err := s.store.cleanupOldContent(site.RepoID, site.TarGzSHA256); err != nil {
-		s.logger.Error("cleaning old Pages content failed", "repo_id", site.RepoID, "error", err)
+	if err := s.store.cleanupSupersededContent(site.RepoID, site.TarGzSHA256); err != nil {
+		s.logger.Error("cleaning superseded Pages content failed", "repo_id", site.RepoID, "error", err)
 	}
 	return s.reportResult(ctx, site, site.TarGzSHA256, true, publication.DefaultPublished, publication.CustomPublished, errorCode)
 }

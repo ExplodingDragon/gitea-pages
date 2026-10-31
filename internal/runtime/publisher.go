@@ -119,7 +119,7 @@ func (d storedDeployments) ForEach(fn func(ActiveDeployment) error) error {
 		if local.InstalledDigest == "" || !local.DefaultPublished && !local.CustomPublished {
 			return true
 		}
-		content, ok := d.store.content(local.Site.RepoID, local.InstalledDigest)
+		content, ok := d.store.installedContent(local.Site.RepoID, local.InstalledDigest)
 		if !ok {
 			return true
 		}

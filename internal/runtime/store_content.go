@@ -16,10 +16,10 @@ func (s *store) siteDir(repoID int64) string {
 	return filepath.Join(s.root, "sites", strconv.FormatInt(repoID, 10))
 }
 
-// removeContent removes the installed files but keeps the repository record.
+// removeInstalledContent removes the installed files but keeps the repository record.
 // Gitea keeps repository tombstones so a later repository with the same name
 // cannot inherit the old local deployment state.
-func (s *store) removeContent(repoID int64) error {
+func (s *store) removeInstalledContent(repoID int64) error {
 	dir := s.siteDir(repoID)
 	entries, err := os.ReadDir(dir)
 	if os.IsNotExist(err) {
@@ -42,7 +42,7 @@ func (s *store) workDir(repoID int64) (string, error) {
 	return os.MkdirTemp(filepath.Join(s.root, "work"), fmt.Sprintf("%d-", repoID))
 }
 
-func (s *store) prepareContent(repoID int64, digest, candidate string) (Content, error) {
+func (s *store) installContent(repoID int64, digest, candidate string) (Content, error) {
 	if !isSHA256Digest(digest) {
 		return Content{}, errors.New("invalid digest")
 	}
@@ -53,7 +53,7 @@ func (s *store) prepareContent(repoID int64, digest, candidate string) (Content,
 	final := filepath.Join(dir, "content-"+digest)
 	if info, err := os.Lstat(final); err == nil {
 		if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
-			return Content{}, errors.New("prepared content path is not a directory")
+			return Content{}, errors.New("installed content path is not a directory")
 		}
 		if err := os.RemoveAll(candidate); err != nil {
 			return Content{}, err
@@ -71,14 +71,14 @@ func (s *store) prepareContent(repoID int64, digest, candidate string) (Content,
 	return Content{digest: digest, root: final}, nil
 }
 
-func (s *store) content(repoID int64, digest string) (Content, bool) {
-	if !s.installedMatches(repoID, digest) {
+func (s *store) installedContent(repoID int64, digest string) (Content, bool) {
+	if !s.hasInstalledContent(repoID, digest) {
 		return Content{}, false
 	}
 	return Content{digest: digest, root: filepath.Join(s.siteDir(repoID), "content-"+digest)}, true
 }
 
-func (s *store) discardContent(repoID int64, digest string) error {
+func (s *store) discardUnpublishedContent(repoID int64, digest string) error {
 	local, ok := s.getSite(repoID)
 	if ok && local.InstalledDigest == digest {
 		return nil
@@ -89,7 +89,7 @@ func (s *store) discardContent(repoID int64, digest string) error {
 	return os.RemoveAll(filepath.Join(s.siteDir(repoID), "content-"+digest))
 }
 
-func (s *store) cleanupOldContent(repoID int64, digest string) error {
+func (s *store) cleanupSupersededContent(repoID int64, digest string) error {
 	if !isSHA256Digest(digest) {
 		return nil
 	}
@@ -129,7 +129,7 @@ func (s *store) cleanupUntrackedContent() error {
 	s.mu.RUnlock()
 	var cleanupErr error
 	for _, site := range trackedSites {
-		if err := s.cleanupOldContent(site.Site.RepoID, site.InstalledDigest); err != nil && cleanupErr == nil {
+		if err := s.cleanupSupersededContent(site.Site.RepoID, site.InstalledDigest); err != nil && cleanupErr == nil {
 			cleanupErr = err
 		}
 	}
@@ -159,7 +159,7 @@ func (s *store) cleanupUntrackedContent() error {
 	return cleanupErr
 }
 
-func (s *store) installedMatches(repoID int64, digest string) bool {
+func (s *store) hasInstalledContent(repoID int64, digest string) bool {
 	if !isSHA256Digest(digest) {
 		return false
 	}
@@ -179,7 +179,7 @@ func isSHA256Digest(digest string) bool {
 	return true
 }
 
-func routeStateChanged(old, current site) bool {
+func publicationRouteChanged(old, current site) bool {
 	if old.OwnerName != current.OwnerName || old.RepoName != current.RepoName || old.Deleted != current.Deleted || old.Enabled != current.Enabled {
 		return true
 	}

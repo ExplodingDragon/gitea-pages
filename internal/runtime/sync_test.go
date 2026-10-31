@@ -313,7 +313,7 @@ func TestPublishFailureRetainsConfirmedContent(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(oldCandidate, "old.html"), []byte("old"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := store.prepareContent(targetSite.RepoID, oldDigest, oldCandidate); err != nil {
+	if _, err := store.installContent(targetSite.RepoID, oldDigest, oldCandidate); err != nil {
 		t.Fatal(err)
 	}
 	if applied, err := store.saveDeploymentResult(targetSite, oldDigest, true, false); err != nil || !applied {
@@ -326,7 +326,7 @@ func TestPublishFailureRetainsConfirmedContent(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(newCandidate, "new.html"), []byte("new"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	content, err := store.prepareContent(targetSite.RepoID, newDigest, newCandidate)
+	content, err := store.installContent(targetSite.RepoID, newDigest, newCandidate)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -342,10 +342,10 @@ func TestPublishFailureRetainsConfirmedContent(t *testing.T) {
 	if !local.DefaultPublished || local.CustomPublished || local.InstalledDigest != oldDigest {
 		t.Fatalf("confirmed publication was not retained: %#v", local)
 	}
-	if _, ok := store.content(targetSite.RepoID, oldDigest); !ok {
+	if _, ok := store.installedContent(targetSite.RepoID, oldDigest); !ok {
 		t.Fatal("confirmed content was removed")
 	}
-	if _, ok := store.content(targetSite.RepoID, newDigest); ok {
+	if _, ok := store.installedContent(targetSite.RepoID, newDigest); ok {
 		t.Fatal("failed candidate content remains")
 	}
 	if report.ConfigApplied || report.DefaultPublished || report.CustomPublished || report.ActualTarGzSHA256 != oldDigest || report.ErrorCode != instanceErrorRouteApplyFailed {
