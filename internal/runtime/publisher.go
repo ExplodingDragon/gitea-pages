@@ -79,12 +79,9 @@ type Publisher interface {
 	Unpublish(context.Context, int64) error
 }
 
-type managedCertificatePublisher interface {
+type certificatePublisher interface {
 	Publisher
 	challengeResponder
-	initializeCertificates(*certificateManager) error
-	prepareCustomDomain(context.Context, string) error
-	certificatesChanged(context.Context, *certificateManager) error
 }
 
 func deploymentForSite(cfg Config, site site, content Content, custom bool) (Deployment, error) {

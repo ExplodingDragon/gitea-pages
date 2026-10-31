@@ -6,26 +6,33 @@
 package page
 
 import (
+	"context"
 	"log/slog"
 	"net/http"
 
 	"gitea.dev/page/internal/runtime"
 )
 
-// Mode selects the built-in publisher environment read by LoadConfig.
-type Mode = runtime.Mode
-
-const (
-	ModeStandalone = runtime.ModeStandalone
-	ModeNginx      = runtime.ModeNginx
-)
-
 // Config contains the synchronization, storage, publication, DNS, and TLS
-// settings used by Service and the built-in publishers.
+// settings used by Service and the built-in publisher.
 type Config = runtime.Config
 
-// LoadConfig reads and validates the environment for one serving mode.
-func LoadConfig(mode Mode) (Config, error) { return runtime.LoadConfig(mode) }
+// HTTPSMode identifies which component owns the public HTTPS entry.
+type HTTPSMode = runtime.HTTPSMode
+
+const (
+	HTTPSDisabled = runtime.HTTPSDisabled
+	HTTPSPages    = runtime.HTTPSPages
+	HTTPSProxy    = runtime.HTTPSProxy
+)
+
+// LoadConfig reads and validates one Pages YAML configuration file.
+func LoadConfig(path string) (Config, error) { return runtime.LoadConfig(path) }
+
+// Run starts the built-in HTTP publisher and synchronization service.
+func Run(ctx context.Context, cfg Config, options ...Option) error {
+	return runtime.Run(ctx, cfg, options...)
+}
 
 // Content is an immutable, validated website directory prepared by Service.
 type Content = runtime.Content
@@ -72,20 +79,4 @@ type Service = runtime.Service
 // NewService creates an embeddable Pages service for a Publisher.
 func NewService(cfg Config, publisher Publisher, options ...Option) (*Service, error) {
 	return runtime.NewService(cfg, publisher, options...)
-}
-
-// StandalonePublisher serves active sites with the Go HTTP server.
-type StandalonePublisher = runtime.StandalonePublisher
-
-// NewStandalonePublisher creates the built-in Go HTTP publisher.
-func NewStandalonePublisher(cfg Config) (*StandalonePublisher, error) {
-	return runtime.NewStandalonePublisher(cfg)
-}
-
-// NginxPublisher renders, validates, and activates the external Nginx entry.
-type NginxPublisher = runtime.NginxPublisher
-
-// NewNginxPublisher prepares the configured Nginx output directories.
-func NewNginxPublisher(cfg Config) (*NginxPublisher, error) {
-	return runtime.NewNginxPublisher(cfg)
 }

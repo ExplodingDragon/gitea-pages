@@ -8,10 +8,12 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"math/rand"
+	"math/rand/v2"
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/go-acme/lego/v5/challenge"
 )
 
 const (
@@ -33,6 +35,7 @@ type syncer struct {
 	txtRequirementChanged atomic.Bool
 	certificates          *certificateManager
 	acme                  *acmeManager
+	dns01Provider         challenge.Provider
 	http01Addresses       []string
 	challengeResponder    challengeResponder
 	txtLookup             func(context.Context, string, string) (txtVerificationResult, error)
@@ -74,7 +77,10 @@ func (s *syncer) run(ctx context.Context) error {
 		stopWorkers()
 		s.workers.Wait()
 	}()
-	t := time.NewTimer(s.cfg.SyncInterval + time.Duration(rand.Int63n(int64(s.cfg.SyncInterval/4+1))))
+	nextSyncDelay := func() time.Duration {
+		return s.cfg.SyncInterval + time.Duration(rand.Int64N(int64(s.cfg.SyncInterval/4+1)))
+	}
+	t := time.NewTimer(nextSyncDelay())
 	defer t.Stop()
 	retryTicker := time.NewTicker(deploymentRetryInterval)
 	defer retryTicker.Stop()
@@ -108,7 +114,7 @@ func (s *syncer) run(ctx context.Context) error {
 			}
 			return fmt.Errorf("embedded etcd stopped: %w", err)
 		case <-t.C:
-			t.Reset(s.cfg.SyncInterval + time.Duration(rand.Int63n(int64(s.cfg.SyncInterval/4+1))))
+			t.Reset(nextSyncDelay())
 		case <-retryTicker.C:
 			if registered {
 				s.requestPendingScan()

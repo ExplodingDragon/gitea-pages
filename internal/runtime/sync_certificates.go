@@ -14,7 +14,7 @@ import (
 // is idle. Certificate material belongs to Pages, so this work is deliberately
 // local and does not add another Gitea task or state transition.
 func (s *syncer) certificateLoop(ctx context.Context) {
-	if s.certificates == nil || s.cfg.RootURL.Scheme != "https" {
+	if s.certificates == nil {
 		return
 	}
 	s.refreshCertificates(ctx)
@@ -56,14 +56,8 @@ func (s *syncer) pruneUnusedCertificates() error {
 		}
 		return true
 	})
-	changed, err := s.certificates.pruneUnusedCustom(allowed)
-	if err != nil || !changed {
-		return err
-	}
-	if publisher, ok := s.publisher.(managedCertificatePublisher); ok {
-		return publisher.certificatesChanged(context.Background(), s.certificates)
-	}
-	return nil
+	_, err := s.certificates.pruneUnusedCustom(allowed)
+	return err
 }
 
 func (s *syncer) enqueueCertificateRenewals() {
@@ -74,7 +68,7 @@ func (s *syncer) enqueueCertificateRenewals() {
 		if local.Site.Deleted || !local.Site.Enabled {
 			return true
 		}
-		if s.cfg.RootURL.Scheme == "https" && local.DefaultPublished && !s.certificates.hasUsable("") {
+		if local.DefaultPublished && !s.certificates.hasUsable("") {
 			s.enqueueSite(local.Site.RepoID)
 			return true
 		}
@@ -86,7 +80,7 @@ func (s *syncer) enqueueCertificateRenewals() {
 }
 
 func (s *syncer) ensureDefaultCertificate(ctx context.Context) error {
-	if s.certificates == nil || s.cfg.RootURL.Scheme != "https" {
+	if s.certificates == nil {
 		return nil
 	}
 	if !s.certificates.needsRenewal("", certificateRenewalWindow) {
@@ -95,24 +89,14 @@ func (s *syncer) ensureDefaultCertificate(ctx context.Context) error {
 		}
 		return nil
 	}
-	if s.acme == nil {
+	if s.acme == nil || s.dns01Provider == nil {
 		return errors.New("default certificate needs renewal but DNS-01 is not configured")
 	}
-	provider, err := newDNS01Provider(s.cfg.DNSProvider, s.cfg.DNSPresentCommand, s.cfg.DNSCleanupCommand)
+	record, err := s.acme.issueDefaultDNS01(ctx, s.cfg.RootURL.Hostname(), s.dns01Provider)
 	if err != nil {
 		return err
 	}
-	record, err := s.acme.issueDefaultDNS01(ctx, s.cfg.RootURL.Hostname(), provider)
-	if err != nil {
-		return err
-	}
-	if err := s.certificates.save(ctx, record); err != nil {
-		return err
-	}
-	if publisher, ok := s.publisher.(managedCertificatePublisher); ok {
-		return publisher.certificatesChanged(ctx, s.certificates)
-	}
-	return nil
+	return s.certificates.save(ctx, record)
 }
 
 func (s *syncer) customDomainAuthorized(ctx context.Context, site site) (bool, error) {
@@ -164,29 +148,26 @@ func (s *syncer) customDomainAuthorized(ctx context.Context, site site) (bool, e
 	return true, nil
 }
 
-func (s *syncer) ensureCustomCertificate(ctx context.Context, site site) (bool, error) {
-	if s.certificates == nil || s.cfg.RootURL.Scheme != "https" {
-		return false, nil
+func (s *syncer) ensureCustomCertificate(ctx context.Context, site site) error {
+	if s.certificates == nil {
+		return nil
 	}
 	domain := site.CustomDomain
 	if domain == nil || s.certificates.hasUsable(domain.Host) && !s.certificates.needsRenewal(domain.Host, certificateRenewalWindow) {
-		return false, nil
+		return nil
 	}
 	if s.acme == nil {
-		return false, fmt.Errorf("no certificate for %s", domain.Host)
+		return fmt.Errorf("no certificate for %s", domain.Host)
 	}
 	if len(s.http01Addresses) == 0 {
-		return false, errors.New("HTTP-01 probe addresses are not configured")
+		return errors.New("HTTP-01 probe addresses are not configured")
 	}
 	if s.challengeResponder == nil {
-		return false, errors.New("HTTP-01 challenge responder is not configured")
+		return errors.New("HTTP-01 challenge responder is not configured")
 	}
 	record, err := s.acme.issueHTTP01(ctx, domain.Host, s.challengeResponder, s.http01Addresses)
 	if err != nil {
-		return false, err
+		return err
 	}
-	if err := s.certificates.save(ctx, record); err != nil {
-		return false, err
-	}
-	return true, nil
+	return s.certificates.save(ctx, record)
 }

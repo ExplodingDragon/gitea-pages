@@ -4,6 +4,8 @@
 package runtime
 
 import (
+	"context"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -23,13 +25,17 @@ func (d testDeployments) ForEach(fn func(ActiveDeployment) error) error {
 	return nil
 }
 
-func newTestStandalonePublisher(t *testing.T, scheme, customRoot string, deployments ...ActiveDeployment) *StandalonePublisher {
+func newTestHTTPPublisher(t *testing.T, scheme, customRoot string, deployments ...ActiveDeployment) *httpPublisher {
 	t.Helper()
 	root, err := url.Parse(scheme + "://pages.example")
 	if err != nil {
 		t.Fatal(err)
 	}
-	publisher, err := NewStandalonePublisher(Config{RootURL: root, CustomRoot: customRoot})
+	mode := HTTPSDisabled
+	if scheme == "https" {
+		mode = HTTPSPages
+	}
+	publisher, err := newHTTPPublisher(Config{RootURL: root, CustomRoot: customRoot, HTTPSMode: mode})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -66,7 +72,7 @@ func testDeployment(t *testing.T, repoID int64, digest, defaultAddress, customAd
 	return deployment
 }
 
-func requestStandalone(t *testing.T, publisher *StandalonePublisher, target, host string, secure bool) *httptest.ResponseRecorder {
+func requestHTTPPublisher(t *testing.T, publisher *httpPublisher, target, host string, secure bool) *httptest.ResponseRecorder {
 	t.Helper()
 	req := httptest.NewRequest(http.MethodGet, target, nil)
 	req.Host = host
@@ -75,35 +81,35 @@ func requestStandalone(t *testing.T, publisher *StandalonePublisher, target, hos
 	return resp
 }
 
-func TestStandalonePublisherServesIndexlessContentAndProbe(t *testing.T) {
+func TestHTTPPublisherServesIndexlessContentAndProbe(t *testing.T) {
 	digest := "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 	deployment := testDeployment(t, 7, digest, "http://alice.pages.example/docs/", "", map[string]string{
 		"assets/app.js": "app", "download.unknown": "opaque", "release..txt": "valid name",
 	})
-	publisher := newTestStandalonePublisher(t, "http", "", ActiveDeployment{Deployment: deployment, Publication: Publication{DefaultPublished: true}})
+	publisher := newTestHTTPPublisher(t, "http", "", ActiveDeployment{Deployment: deployment, Publication: Publication{DefaultPublished: true}})
 
-	if resp := requestStandalone(t, publisher, "http://alice.pages.example/docs/", "alice.pages.example", false); resp.Code != http.StatusNotFound {
+	if resp := requestHTTPPublisher(t, publisher, "http://alice.pages.example/docs/", "alice.pages.example", false); resp.Code != http.StatusNotFound {
 		t.Fatalf("indexless root status=%d body=%q", resp.Code, resp.Body.String())
 	}
-	if resp := requestStandalone(t, publisher, "http://alice.pages.example/docs/assets/app.js", "alice.pages.example", false); resp.Code != http.StatusOK || resp.Body.String() != "app" {
+	if resp := requestHTTPPublisher(t, publisher, "http://alice.pages.example/docs/assets/app.js", "alice.pages.example", false); resp.Code != http.StatusOK || resp.Body.String() != "app" {
 		t.Fatalf("asset status=%d body=%q", resp.Code, resp.Body.String())
 	}
-	if resp := requestStandalone(t, publisher, "http://alice.pages.example/docs/.gitea-pages-probe", "alice.pages.example", false); resp.Code != http.StatusOK || resp.Body.String() != "7 "+digest+"\n" {
+	if resp := requestHTTPPublisher(t, publisher, "http://alice.pages.example/docs/.gitea-pages-probe", "alice.pages.example", false); resp.Code != http.StatusOK || resp.Body.String() != "7 "+digest+"\n" {
 		t.Fatalf("probe status=%d body=%q", resp.Code, resp.Body.String())
 	}
-	if resp := requestStandalone(t, publisher, "http://alice.pages.example/docs/download.unknown", "alice.pages.example", false); resp.Code != http.StatusOK || resp.Header().Get("Content-Type") != "application/octet-stream" {
+	if resp := requestHTTPPublisher(t, publisher, "http://alice.pages.example/docs/download.unknown", "alice.pages.example", false); resp.Code != http.StatusOK || resp.Header().Get("Content-Type") != "application/octet-stream" {
 		t.Fatalf("unknown file status=%d type=%q", resp.Code, resp.Header().Get("Content-Type"))
 	}
-	if resp := requestStandalone(t, publisher, "http://alice.pages.example/docs/release..txt", "alice.pages.example", false); resp.Code != http.StatusOK || resp.Body.String() != "valid name" {
+	if resp := requestHTTPPublisher(t, publisher, "http://alice.pages.example/docs/release..txt", "alice.pages.example", false); resp.Code != http.StatusOK || resp.Body.String() != "valid name" {
 		t.Fatalf("double-dot file status=%d body=%q", resp.Code, resp.Body.String())
 	}
 }
 
-func TestStandalonePublisherReplacesRepositoryRoutes(t *testing.T) {
+func TestHTTPPublisherReplacesRepositoryRoutes(t *testing.T) {
 	digest := "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
 	old := testDeployment(t, 8, digest, "https://alice.pages.example/docs/", "https://custom.example/", map[string]string{"index.html": "old"})
-	publisher := newTestStandalonePublisher(t, "https", "", ActiveDeployment{Deployment: old, Publication: Publication{DefaultPublished: true, CustomPublished: true}})
-	if resp := requestStandalone(t, publisher, "http://custom.example/check", "custom.example", false); resp.Code != http.StatusPermanentRedirect {
+	publisher := newTestHTTPPublisher(t, "https", "", ActiveDeployment{Deployment: old, Publication: Publication{DefaultPublished: true, CustomPublished: true}})
+	if resp := requestHTTPPublisher(t, publisher, "http://custom.example/check", "custom.example", false); resp.Code != http.StatusPermanentRedirect {
 		t.Fatalf("custom redirect status=%d", resp.Code)
 	}
 
@@ -114,15 +120,72 @@ func TestStandalonePublisherReplacesRepositoryRoutes(t *testing.T) {
 	publisher.routeIndex.mu.Lock()
 	publisher.setDeploymentLocked(updated, Publication{DefaultPublished: true})
 	publisher.routeIndex.mu.Unlock()
-	if resp := requestStandalone(t, publisher, "http://custom.example/check", "custom.example", false); resp.Code != http.StatusNotFound {
+	if resp := requestHTTPPublisher(t, publisher, "http://custom.example/check", "custom.example", false); resp.Code != http.StatusNotFound {
 		t.Fatalf("removed custom host status=%d", resp.Code)
 	}
-	if resp := requestStandalone(t, publisher, "https://alice.pages.example/renamed/", "alice.pages.example", true); resp.Code != http.StatusOK || resp.Body.String() != "old" {
+	if resp := requestHTTPPublisher(t, publisher, "https://alice.pages.example/renamed/", "alice.pages.example", true); resp.Code != http.StatusOK || resp.Body.String() != "old" {
 		t.Fatalf("renamed route status=%d body=%q", resp.Code, resp.Body.String())
 	}
 }
 
-func TestStandalonePublisherDoesNotFollowEscapingSymlink(t *testing.T) {
+func TestHTTPPublisherProxyServesPlainHTTP(t *testing.T) {
+	deployment := testDeployment(t, 11, "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee", "https://alice.pages.example/docs/", "", map[string]string{"index.html": "proxied"})
+	root, err := url.Parse("https://pages.example")
+	if err != nil {
+		t.Fatal(err)
+	}
+	publisher, err := newHTTPPublisher(Config{RootURL: root, HTTPSMode: HTTPSProxy})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := publisher.Restore(t.Context(), testDeployments{{Deployment: deployment, Publication: Publication{DefaultPublished: true}}}); err != nil {
+		t.Fatal(err)
+	}
+	resp := requestHTTPPublisher(t, publisher, "http://alice.pages.example/docs/", "alice.pages.example", false)
+	if resp.Code != http.StatusOK || resp.Body.String() != "proxied" {
+		t.Fatalf("proxy origin response: status=%d body=%q", resp.Code, resp.Body.String())
+	}
+	publisher.setChallenge("alice.pages.example", "token", "challenge")
+	resp = requestHTTPPublisher(t, publisher, "http://alice.pages.example/.well-known/acme-challenge/token", "alice.pages.example", false)
+	if resp.Code != http.StatusNotFound || resp.Body.String() == "challenge" {
+		t.Fatalf("proxy origin exposed Pages HTTP-01 state: status=%d body=%q", resp.Code, resp.Body.String())
+	}
+}
+
+func TestHTTPPublisherProxyConfirmsDeploymentOverHTTP(t *testing.T) {
+	root, err := url.Parse("https://pages.example")
+	if err != nil {
+		t.Fatal(err)
+	}
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	publisher, err := newHTTPPublisher(Config{RootURL: root, HTTPSMode: HTTPSProxy, HTTPListen: listener.Addr().String()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := &http.Server{Handler: publisher.Handler(false)}
+	done := make(chan error, 1)
+	go func() { done <- server.Serve(listener) }()
+	t.Cleanup(func() {
+		_ = server.Shutdown(context.Background())
+		if err := <-done; err != nil && err != http.ErrServerClosed {
+			t.Errorf("serve HTTP origin: %v", err)
+		}
+	})
+
+	deployment := testDeployment(t, 12, "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff", "https://alice.pages.example/docs/", "", map[string]string{"index.html": "proxied"})
+	publication, err := publisher.Publish(t.Context(), deployment)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !publication.DefaultPublished || publication.Problem != PublicationProblemNone {
+		t.Fatalf("unexpected proxy publication: %#v", publication)
+	}
+}
+
+func TestHTTPPublisherDoesNotFollowEscapingSymlink(t *testing.T) {
 	outside := filepath.Join(t.TempDir(), "outside")
 	if err := os.WriteFile(outside, []byte("secret"), 0o644); err != nil {
 		t.Fatal(err)
@@ -131,29 +194,29 @@ func TestStandalonePublisherDoesNotFollowEscapingSymlink(t *testing.T) {
 	if err := os.Symlink(outside, filepath.Join(deployment.Content.Path(), "index.html")); err != nil {
 		t.Fatal(err)
 	}
-	publisher := newTestStandalonePublisher(t, "http", "", ActiveDeployment{Deployment: deployment, Publication: Publication{DefaultPublished: true}})
-	if resp := requestStandalone(t, publisher, "http://alice.pages.example/docs/", "alice.pages.example", false); resp.Code != http.StatusNotFound {
+	publisher := newTestHTTPPublisher(t, "http", "", ActiveDeployment{Deployment: deployment, Publication: Publication{DefaultPublished: true}})
+	if resp := requestHTTPPublisher(t, publisher, "http://alice.pages.example/docs/", "alice.pages.example", false); resp.Code != http.StatusNotFound {
 		t.Fatalf("escaping symlink status=%d body=%q", resp.Code, resp.Body.String())
 	}
 }
 
-func TestStandalonePublisherUsesSiteAndPlatformResources(t *testing.T) {
+func TestHTTPPublisherUsesSiteAndPlatformResources(t *testing.T) {
 	custom := filepath.Join(t.TempDir(), "custom")
-	if err := os.MkdirAll(filepath.Join(custom, "public", "errors"), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Join(custom, "errors"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(custom, "public", "index.html"), []byte("custom home"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(custom, "index.html"), []byte("custom home"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(custom, "public", "errors", "404.html"), []byte("platform missing"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(custom, "errors", "404.html"), []byte("platform missing"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	deployment := testDeployment(t, 10, "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd", "http://alice.pages.example/docs/", "", map[string]string{"404.html": "site missing"})
-	publisher := newTestStandalonePublisher(t, "http", custom, ActiveDeployment{Deployment: deployment, Publication: Publication{DefaultPublished: true}})
-	if resp := requestStandalone(t, publisher, "http://alice.pages.example/docs/missing", "alice.pages.example", false); resp.Code != http.StatusNotFound || resp.Body.String() != "site missing" {
+	publisher := newTestHTTPPublisher(t, "http", custom, ActiveDeployment{Deployment: deployment, Publication: Publication{DefaultPublished: true}})
+	if resp := requestHTTPPublisher(t, publisher, "http://alice.pages.example/docs/missing", "alice.pages.example", false); resp.Code != http.StatusNotFound || resp.Body.String() != "site missing" {
 		t.Fatalf("site 404 status=%d body=%q", resp.Code, resp.Body.String())
 	}
-	if resp := requestStandalone(t, publisher, "http://pages.example/", "pages.example", false); resp.Code != http.StatusOK || resp.Body.String() != "custom home" {
+	if resp := requestHTTPPublisher(t, publisher, "http://pages.example/", "pages.example", false); resp.Code != http.StatusOK || resp.Body.String() != "custom home" {
 		t.Fatalf("platform home status=%d body=%q", resp.Code, resp.Body.String())
 	}
 }

@@ -16,12 +16,14 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
+	"path/filepath"
 	"sync"
 	"testing"
 	"time"
 )
 
-// TestSyncDeployAndServe exercises the complete standalone path through the
+// TestSyncDeployAndServe exercises the complete built-in HTTP path through the
 // public module boundary: a site is listed by Gitea, its tar.gz is downloaded,
 // checked and installed, deployment is reported, and the installed site is
 // then served by the real HTTP handler. A second listing/update confirms that
@@ -117,12 +119,13 @@ func TestSyncDeployAndServe(t *testing.T) {
 		DataRoot:          dataRoot,
 		EtcdQuotaBytes:    defaultEtcdQuotaBytes,
 		HTTPListen:        listener.Addr().String(),
+		HTTPSMode:         HTTPSDisabled,
 		DeployQueueSize:   1,
 		DeployConcurrency: 1,
 		DeployTimeout:     time.Minute,
 		SyncInterval:      time.Minute,
 	}
-	publisher, err := NewStandalonePublisher(cfg)
+	publisher, err := newHTTPPublisher(cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -159,6 +162,12 @@ func TestSyncDeployAndServe(t *testing.T) {
 	syncer.requestPendingScan()
 	waitForReport(t, reportCh, secondDigest)
 	assertSiteBody(t, listener.Addr().String(), "alice.pages.example.test", "updated page")
+	if _, err := os.Stat(filepath.Join(store.siteDir(42), "content-"+firstDigest)); !os.IsNotExist(err) {
+		t.Fatalf("previous Pages content remains after publishing its replacement: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(store.siteDir(42), "content-"+secondDigest)); err != nil {
+		t.Fatalf("current Pages content was removed: %v", err)
+	}
 
 	mu.Lock()
 	defer mu.Unlock()

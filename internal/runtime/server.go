@@ -18,8 +18,8 @@ import (
 	"time"
 )
 
-// StandalonePublisher serves active sites with the Go HTTP server.
-type StandalonePublisher struct {
+// httpPublisher maps confirmed deployments to the built-in HTTP handlers.
+type httpPublisher struct {
 	cfg         Config
 	root        *url.URL
 	challengeMu sync.RWMutex
@@ -40,20 +40,20 @@ type routeEntry struct {
 	base       string
 }
 
-func (s *StandalonePublisher) setChallenge(host, token, keyAuthorization string) {
+func (s *httpPublisher) setChallenge(host, token, keyAuthorization string) {
 	s.challengeMu.Lock()
 	s.challenges[normalizeHost(host)+"/"+token] = keyAuthorization
 	s.challengeMu.Unlock()
 }
 
-func (s *StandalonePublisher) clearChallenge(host, token string) {
+func (s *httpPublisher) clearChallenge(host, token string) {
 	s.challengeMu.Lock()
 	delete(s.challenges, normalizeHost(host)+"/"+token)
 	s.challengeMu.Unlock()
 }
 
-// NewStandalonePublisher creates the built-in Go HTTP publisher.
-func NewStandalonePublisher(cfg Config) (*StandalonePublisher, error) {
+// newHTTPPublisher creates the built-in publisher.
+func newHTTPPublisher(cfg Config) (*httpPublisher, error) {
 	if cfg.RootURL == nil || cfg.RootURL.Hostname() == "" || cfg.RootURL.Scheme != "http" && cfg.RootURL.Scheme != "https" {
 		return nil, errors.New("pages root URL must use HTTP or HTTPS")
 	}
@@ -61,7 +61,7 @@ func NewStandalonePublisher(cfg Config) (*StandalonePublisher, error) {
 	if err != nil {
 		return nil, err
 	}
-	s := &StandalonePublisher{
+	s := &httpPublisher{
 		cfg:        cfg,
 		root:       cfg.RootURL,
 		challenges: make(map[string]string),
@@ -78,13 +78,13 @@ func NewStandalonePublisher(cfg Config) (*StandalonePublisher, error) {
 // Handler returns a request handler for one listener. The secure flag records
 // whether that listener already terminated TLS, while both handlers share the
 // same route and challenge state.
-func (s *StandalonePublisher) Handler(secure bool) http.Handler {
+func (s *httpPublisher) Handler(secure bool) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		s.serveHTTP(w, r, secure)
 	})
 }
 
-func (s *StandalonePublisher) removeRepositoryLocked(repoID int64) {
+func (s *httpPublisher) removeRepositoryLocked(repoID int64) {
 	for _, key := range s.routeIndex.byRepo[repoID] {
 		if entry, exists := s.routeIndex.routes[key]; exists && entry.deployment.RepositoryID == repoID {
 			delete(s.routeIndex.routes, key)
@@ -99,7 +99,7 @@ func (s *StandalonePublisher) removeRepositoryLocked(repoID int64) {
 	delete(s.routeIndex.byRepo, repoID)
 }
 
-func (s *StandalonePublisher) setDeploymentLocked(deployment Deployment, publication Publication) {
+func (s *httpPublisher) setDeploymentLocked(deployment Deployment, publication Publication) {
 	s.removeRepositoryLocked(deployment.RepositoryID)
 	for key, entry := range deploymentRoutes(deployment, publication) {
 		s.routeIndex.routes[key] = entry
@@ -126,7 +126,7 @@ func deploymentRoutes(deployment Deployment, publication Publication) map[string
 	return routes
 }
 
-func (s *StandalonePublisher) Restore(_ context.Context, deployments Deployments) error {
+func (s *httpPublisher) Restore(_ context.Context, deployments Deployments) error {
 	routes := make(map[string]routeEntry)
 	byRepo := make(map[int64][]string)
 	byHost := make(map[string]int)
@@ -146,7 +146,7 @@ func (s *StandalonePublisher) Restore(_ context.Context, deployments Deployments
 	return nil
 }
 
-func (s *StandalonePublisher) Publish(ctx context.Context, deployment Deployment) (Publication, error) {
+func (s *httpPublisher) Publish(ctx context.Context, deployment Deployment) (Publication, error) {
 	s.routeIndex.mu.Lock()
 	old := make(map[string]routeEntry, len(s.routeIndex.byRepo[deployment.RepositoryID]))
 	for _, key := range s.routeIndex.byRepo[deployment.RepositoryID] {
@@ -171,26 +171,28 @@ func (s *StandalonePublisher) Publish(ctx context.Context, deployment Deployment
 		restore()
 		return Publication{}, err
 	}
-	if err := probePlatform(ctx, httpAddress, s.root.Hostname()); err != nil {
-		restore()
-		return Publication{}, err
-	}
 	deploymentAddress := httpAddress
-	if s.root.Scheme == "https" {
+	probeScheme := "http"
+	if s.cfg.HTTPSMode == HTTPSPages {
 		deploymentAddress, err = localListenAddress(s.cfg.HTTPSListen)
 		if err != nil {
 			restore()
 			return Publication{}, err
 		}
+		probeScheme = "https"
+	}
+	if err := probeHTTP(ctx, probeScheme, deploymentAddress, s.root.Hostname(), "/@gitea-pages/ready", http.StatusNoContent, ""); err != nil {
+		restore()
+		return Publication{}, err
 	}
 	result := Publication{}
-	if err := probeDeploymentURL(ctx, deploymentAddress, deployment.DefaultURL, deployment.RepositoryID, deployment.Content.Digest()); err == nil {
+	if err := probeDeploymentURL(ctx, probeScheme, deploymentAddress, deployment.DefaultURL, deployment.RepositoryID, deployment.Content.Digest()); err == nil {
 		result.DefaultPublished = true
 	} else {
 		result.Problem = PublicationProblemEntryProbeFailed
 	}
 	if deployment.CustomURL != nil {
-		if err := probeDeploymentURL(ctx, deploymentAddress, *deployment.CustomURL, deployment.RepositoryID, deployment.Content.Digest()); err == nil {
+		if err := probeDeploymentURL(ctx, probeScheme, deploymentAddress, *deployment.CustomURL, deployment.RepositoryID, deployment.Content.Digest()); err == nil {
 			result.CustomPublished = true
 		} else {
 			result.Problem = PublicationProblemEntryProbeFailed
@@ -202,18 +204,10 @@ func (s *StandalonePublisher) Publish(ctx context.Context, deployment Deployment
 	return result, nil
 }
 
-func (s *StandalonePublisher) Unpublish(_ context.Context, repoID int64) error {
+func (s *httpPublisher) Unpublish(_ context.Context, repoID int64) error {
 	s.routeIndex.mu.Lock()
 	s.removeRepositoryLocked(repoID)
 	s.routeIndex.mu.Unlock()
-	return nil
-}
-
-func (s *StandalonePublisher) prepareCustomDomain(context.Context, string) error { return nil }
-
-func (s *StandalonePublisher) initializeCertificates(*certificateManager) error { return nil }
-
-func (s *StandalonePublisher) certificatesChanged(context.Context, *certificateManager) error {
 	return nil
 }
 
@@ -224,7 +218,7 @@ func routeHost(key string) string {
 	return host
 }
 
-func (s *StandalonePublisher) lookupRoute(host, requestPath string) (routeEntry, bool) {
+func (s *httpPublisher) lookupRoute(host, requestPath string) (routeEntry, bool) {
 	s.routeIndex.mu.RLock()
 	defer s.routeIndex.mu.RUnlock()
 	segment := strings.TrimPrefix(requestPath, "/")
@@ -241,7 +235,7 @@ func (s *StandalonePublisher) lookupRoute(host, requestPath string) (routeEntry,
 	return root, ok
 }
 
-func (s *StandalonePublisher) serveHTTP(w http.ResponseWriter, r *http.Request, secure bool) {
+func (s *httpPublisher) serveHTTP(w http.ResponseWriter, r *http.Request, secure bool) {
 	if r.Method != http.MethodGet && r.Method != http.MethodHead {
 		w.Header().Set("Allow", "GET, HEAD")
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -251,14 +245,14 @@ func (s *StandalonePublisher) serveHTTP(w http.ResponseWriter, r *http.Request, 
 	if h, _, err := net.SplitHostPort(host); err == nil {
 		host = h
 	}
-	if s.root.Scheme == "https" && !secure && !strings.HasPrefix(r.URL.Path, "/.well-known/acme-challenge/") && s.knownHost(host) {
+	if s.cfg.HTTPSMode == HTTPSPages && !secure && !strings.HasPrefix(r.URL.Path, "/.well-known/acme-challenge/") && s.knownHost(host) {
 		u := *r.URL
 		u.Scheme = "https"
 		u.Host = host
 		http.Redirect(w, r, u.String(), http.StatusPermanentRedirect)
 		return
 	}
-	if strings.HasPrefix(r.URL.Path, "/.well-known/acme-challenge/") {
+	if s.cfg.HTTPSMode == HTTPSPages && strings.HasPrefix(r.URL.Path, "/.well-known/acme-challenge/") {
 		token := strings.TrimPrefix(r.URL.Path, "/.well-known/acme-challenge/")
 		s.challengeMu.RLock()
 		body, ok := s.challenges[host+"/"+token]
@@ -347,7 +341,7 @@ func (s *StandalonePublisher) serveHTTP(w http.ResponseWriter, r *http.Request, 
 	serveLocalFile(w, r, f, resolvedFile, http.StatusOK)
 }
 
-func (s *StandalonePublisher) knownHost(host string) bool {
+func (s *httpPublisher) knownHost(host string) bool {
 	if host == normalizeHost(s.root.Hostname()) {
 		return true
 	}
@@ -357,8 +351,8 @@ func (s *StandalonePublisher) knownHost(host string) bool {
 }
 
 // siteContentType returns the type from the file extension without reading
-// file contents. Keeping this table in the program makes standalone and nginx
-// serving independent of the host's MIME database; unknown extensions are
+// file contents. Keeping this table in the program makes serving independent
+// of the host's MIME database; unknown extensions are
 // deliberately treated as opaque downloads.
 func siteContentType(name string) string {
 	switch strings.ToLower(filepath.Ext(name)) {
@@ -419,7 +413,7 @@ func normalizeHost(host string) string {
 	return strings.ToLower(strings.TrimSuffix(host, "."))
 }
 
-func (s *StandalonePublisher) serveSiteNotFound(w http.ResponseWriter, r *http.Request, root string) {
+func (s *httpPublisher) serveSiteNotFound(w http.ResponseWriter, r *http.Request, root string) {
 	resolved, err := filepath.EvalSymlinks(filepath.Join(root, "404.html"))
 	if err != nil || !pathWithin(resolved, root) {
 		plainNotFound(w)
@@ -449,7 +443,7 @@ func plainNotFound(w http.ResponseWriter) {
 	http.Error(w, "404 Not Found", http.StatusNotFound)
 }
 
-func (s *StandalonePublisher) servePlatformRoute(w http.ResponseWriter, r *http.Request) {
+func (s *httpPublisher) servePlatformRoute(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-store")
 	if r.URL.Path == "/@gitea-pages/ready" {
 		w.WriteHeader(http.StatusNoContent)
@@ -469,7 +463,7 @@ func (s *StandalonePublisher) servePlatformRoute(w http.ResponseWriter, r *http.
 	s.servePlatformFile(w, r, "errors/404.html", http.StatusNotFound)
 }
 
-func (s *StandalonePublisher) servePlatformFile(w http.ResponseWriter, r *http.Request, name string, status int) {
+func (s *httpPublisher) servePlatformFile(w http.ResponseWriter, r *http.Request, name string, status int) {
 	data, ok := s.resources.files[name]
 	if !ok {
 		plainNotFound(w)

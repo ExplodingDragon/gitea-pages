@@ -60,15 +60,6 @@ func TestCertificateManagerPersistsAndSelectsSNI(t *testing.T) {
 	if m.needsRenewal("CUSTOM.EXAMPLE.", time.Minute) {
 		t.Fatal("normalized custom host certificate unexpectedly needs renewal")
 	}
-	nginxRoot := t.TempDir()
-	if err := m.exportNginx(nginxRoot); err != nil {
-		t.Fatal(err)
-	}
-	keyPath := filepath.Join(nginxRoot, "certs", "custom.example", "privkey.pem")
-	keyInfo, err := os.Stat(keyPath)
-	if err != nil || keyInfo.Mode().Perm() != 0o600 {
-		t.Fatalf("Nginx private key mode: info=%v err=%v", keyInfo, err)
-	}
 	store.close()
 	store, err = openStore(root, defaultEtcdQuotaBytes)
 	if err != nil {
@@ -191,25 +182,12 @@ func TestPruneUnusedACMECertificates(t *testing.T) {
 	if err := m.save(context.Background(), operator); err != nil {
 		t.Fatal(err)
 	}
-	nginxRoot := t.TempDir()
-	if err := m.exportNginx(nginxRoot); err != nil {
-		t.Fatal(err)
-	}
 	changed, err := m.pruneUnusedCustom(map[string]struct{}{})
 	if err != nil || !changed {
 		t.Fatalf("prune unused certificate: changed=%t err=%v", changed, err)
 	}
 	if m.hasUsable("old.example") || !m.hasUsable("operator.example") {
 		t.Fatal("unused ACME certificate remains or operator certificate was removed")
-	}
-	if err := m.exportNginx(nginxRoot); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := os.Stat(filepath.Join(nginxRoot, "certs", "old.example")); !os.IsNotExist(err) {
-		t.Fatalf("obsolete Nginx certificate directory remains: %v", err)
-	}
-	if _, err := os.Stat(filepath.Join(nginxRoot, "certs", "operator.example", "privkey.pem")); err != nil {
-		t.Fatalf("operator certificate output was removed: %v", err)
 	}
 }
 

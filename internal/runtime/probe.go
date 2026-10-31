@@ -17,7 +17,7 @@ import (
 	"time"
 )
 
-func probeDeploymentURL(ctx context.Context, address string, target url.URL, repoID int64, digest string) error {
+func probeDeploymentURL(ctx context.Context, scheme, address string, target url.URL, repoID int64, digest string) error {
 	base := target.Path
 	if base == "" {
 		base = "/"
@@ -29,11 +29,7 @@ func probeDeploymentURL(ctx context.Context, address string, target url.URL, rep
 	if !strings.HasPrefix(path, "/") {
 		return errors.New("invalid probe path")
 	}
-	return probeHTTP(ctx, target.Scheme, address, target.Hostname(), path, http.StatusOK, strconv.FormatInt(repoID, 10)+" "+digest+"\n")
-}
-
-func probePlatform(ctx context.Context, address, host string) error {
-	return probeHTTP(ctx, "http", address, host, "/@gitea-pages/ready", http.StatusNoContent, "")
+	return probeHTTP(ctx, scheme, address, target.Hostname(), path, http.StatusOK, strconv.FormatInt(repoID, 10)+" "+digest+"\n")
 }
 
 func localListenAddress(listen string) (string, error) {

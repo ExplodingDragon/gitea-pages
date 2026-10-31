@@ -37,49 +37,6 @@ type certificateManager struct {
 	parsed  map[string]*tls.Certificate
 }
 
-// certificateFilesMu serializes certificate export with Nginx configuration checks.
-var certificateFilesMu sync.Mutex
-
-func (m *certificateManager) exportNginx(root string) error {
-	certificateFilesMu.Lock()
-	defer certificateFilesMu.Unlock()
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-	out := filepath.Join(root, "certs")
-	if err := os.MkdirAll(out, 0o755); err != nil {
-		return err
-	}
-	for host, r := range m.records {
-		dir := filepath.Join(out, host)
-		if host == "" {
-			dir = filepath.Join(out, "default")
-		}
-		if err := os.MkdirAll(dir, 0o755); err != nil {
-			return err
-		}
-		if err := atomicWriteFile(filepath.Join(dir, "fullchain.pem"), []byte(r.CertificatePEM), 0o644); err != nil {
-			return err
-		}
-		if err := atomicWriteFile(filepath.Join(dir, "privkey.pem"), []byte(r.PrivateKeyPEM), 0o600); err != nil {
-			return err
-		}
-	}
-	entries, err := os.ReadDir(out)
-	if err != nil {
-		return err
-	}
-	for _, entry := range entries {
-		if entry.IsDir() && entry.Name() != "default" {
-			if _, current := m.records[entry.Name()]; !current {
-				if err := os.RemoveAll(filepath.Join(out, entry.Name())); err != nil {
-					return err
-				}
-			}
-		}
-	}
-	return nil
-}
-
 func (m *certificateManager) pruneUnusedCustom(allowed map[string]struct{}) (bool, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()

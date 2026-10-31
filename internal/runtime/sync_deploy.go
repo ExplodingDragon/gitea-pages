@@ -95,16 +95,9 @@ func (s *syncer) publishSite(ctx context.Context, site site, content Content) er
 	if customErr != nil {
 		errorCode = instanceErrorTXTInvalid
 	}
-	certChanged := false
 	if customDomainReady {
-		if publisher, ok := s.publisher.(managedCertificatePublisher); ok && site.CustomDomain != nil {
-			if err := publisher.prepareCustomDomain(ctx, site.CustomDomain.Host); err != nil {
-				return s.reportDeploymentFailure(ctx, site, instanceErrorRouteApplyFailed, err)
-			}
-		}
-		if renewed, err := s.ensureCustomCertificate(ctx, site); err != nil {
-			certChanged = renewed
-			customDomainReady = s.certificates == nil || s.cfg.RootURL.Scheme != "https" ||
+		if err := s.ensureCustomCertificate(ctx, site); err != nil {
+			customDomainReady = s.certificates == nil ||
 				site.CustomDomain == nil || s.certificates.hasUsable(site.CustomDomain.Host)
 			if customDomainReady {
 				errorCode = instanceErrorACMEFailed
@@ -112,15 +105,6 @@ func (s *syncer) publishSite(ctx context.Context, site site, content Content) er
 				errorCode = instanceErrorCertificatePending
 			}
 			s.logger.Error("preparing Pages certificate failed", "repo_id", site.RepoID, "error", err)
-		} else {
-			certChanged = renewed
-		}
-	}
-	if certChanged && s.certificates != nil {
-		if publisher, ok := s.publisher.(managedCertificatePublisher); ok {
-			if err := publisher.certificatesChanged(ctx, s.certificates); err != nil {
-				return s.reportDeploymentFailure(ctx, site, instanceErrorRouteApplyFailed, err)
-			}
 		}
 	}
 	deployment, err := deploymentForSite(s.cfg, site, content, customDomainReady)

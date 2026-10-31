@@ -1,309 +1,249 @@
 # Gitea Pages
 
-Gitea Pages publishes static websites managed by [Gitea](https://github.com/go-gitea/gitea). Gitea owns repository settings, publication sources, content versions, instance registration, and deployment status. A `gitea-pages` instance synchronizes the desired state, validates and deploys the current `tar.gz` artifact, serves it locally, and reports the result to Gitea.
+Gitea Pages is the website-serving companion for Gitea. It synchronizes the current Pages state from Gitea, validates and extracts each TAR.GZ artifact, publishes the result through a built-in HTTP server, and reports the outcome for display in the repository UI.
 
-Pages can serve traffic directly with Go's HTTP server, generate and activate configuration for an external Nginx process, or run as a Go library behind a custom web front end.
+The service is also available as the Go module `gitea.dev/page`. Applications with an existing web stack can implement the public `Publisher` interface and reuse the same synchronization, archive validation, local state, and reporting pipeline.
 
-> [!IMPORTANT]
-> Every website published by the current service is public. Repository visibility and website access are separate settings.
+## Features
 
-## Highlights
-
-- GitHub-style project URLs at `https://<owner>.<pages-domain>/<repository>/`.
-- Owner sites at `https://<owner>.<pages-domain>/` from a repository named `.pages`.
-- Branch/directory, Actions artifact, and web/API artifact publication through Gitea.
-- Full synchronization on first start followed by cursor-based incremental updates.
-- Locally deployed content on the request path, so visitors do not depend on Gitea availability.
-- Standalone HTTP/HTTPS serving and external Nginx integration.
-- Custom domains with optional Gitea and Pages TXT ownership checks.
-- Operator certificates and ACME automation through [`go-acme/lego`](https://github.com/go-acme/lego).
-- HTTP-01 for custom domains and DNS-01 for the default Pages domain.
-- Embedded single-member etcd with no externally exposed client or peer listener.
-- Safe `tar.gz` validation and extraction with synchronized resource limits.
-- A reusable `gitea.dev/page` package and `Publisher` interface for custom web servers.
-- Custom platform home page, 404 page, assets, and Nginx templates.
+- Active deployment of the current artifact without work on visitor requests.
+- Default owner and project addresses compatible with the GitHub Pages layout.
+- Custom domains with independent Gitea and local TXT ownership checks.
+- Built-in HTTP serving, optional native HTTPS, and reverse-proxy operation.
+- ACME through [`go-acme/lego`](https://github.com/go-acme/lego): DNS-01 for the default Pages domain and HTTP-01 for custom domains.
+- Operator-provided certificates and durable ACME certificates stored in embedded etcd.
+- Strict TAR.GZ path, type, size, entry-count, and symbolic-link validation.
+- Bounded deployment queues, incremental synchronization, and durable result delivery.
+- Custom platform home page, 404 page, and assets.
 
 ## How it works
 
 ```mermaid
 flowchart LR
-    G[Gitea<br/>settings, versions, status] -->|desired state and artifacts| P[gitea-pages<br/>sync, validation, deployment]
-    P -->|deployment result| G
-    P --> E[(embedded etcd)]
-    P --> F[(local site files)]
-    P --> S[standalone HTTP/HTTPS]
-    P --> N[Nginx configuration and files]
-    P --> C[custom Publisher]
+    G[Gitea] -->|current sites and TAR.GZ| P[Gitea Pages]
+    P --> E[embedded etcd]
+    P --> F[validated site directories]
+    P --> H[built-in HTTP server]
+    P -->|deployment results| G
+    R[reverse proxy] --> H
 ```
 
-Gitea remains the control plane and artifact source. Each Pages instance independently deploys every enabled site, owns its embedded etcd state, and receives the same repository facts from Gitea.
+Gitea owns repository settings, artifact versions, artifact storage, and the instance registry. Each Pages process owns one local deployment of every enabled site returned by Gitea. It keeps the last confirmed deployment available while synchronization is temporarily unavailable.
 
 ## Requirements
 
 - Go 1.27 or later when building from source.
-- A Gitea installation containing the matching Pages integration.
-- A Pages instance token created by a Gitea site administrator.
-- A persistent local filesystem for state and deployed content.
-- DNS for the Pages root domain and its wildcard subdomains.
-- Nginx 1.19.4 or later when using `nginx` mode.
-- A certificate source when the Pages root URL uses HTTPS.
+- A Gitea instance with Pages support and an instance token created by a global administrator.
+- A persistent local directory for embedded etcd and extracted site content.
+- DNS and certificate automation credentials when Pages manages HTTPS.
 
-## Installation
-
-Clone the repository and build the executable:
+## Build and run
 
 ```sh
-git clone https://github.com/ExplodingDragon/gitea-pages.git
-cd gitea-pages
 make build
-./bin/gitea-pages --help
+./bin/gitea-pages --config /etc/gitea-pages/config.yaml
 ```
 
-The binary is written to `bin/gitea-pages`. Each process starts its embedded etcd storage from the configured data root.
-
-## Quick start
-
-The following example starts a standalone HTTP instance behind a local reverse proxy.
-
-1. Point `pages.example.com` and `*.pages.example.com` to the reverse proxy, preserve the request Host, and route HTTP traffic to `127.0.0.1:3000`.
-2. Open Gitea site administration, create a Pages instance, and copy the one-time instance token.
-3. Create a persistent data directory and start the service:
-
-```sh
-export GITEA_PAGES_GITEA_URL=https://gitea.example.com
-export GITEA_PAGES_ROOT_URL=http://pages.example.com
-export GITEA_PAGES_TOKEN='replace-with-the-instance-token'
-export GITEA_PAGES_DATA_ROOT="$HOME/.local/share/gitea-pages"
-export GITEA_PAGES_HTTP_LISTEN=127.0.0.1:3000
-
-install -d -m 0700 "$GITEA_PAGES_DATA_ROOT"
-
-./bin/gitea-pages standalone
-```
-
-After the instance appears as connected in Gitea, enable Pages in a repository, choose `Branch` or `Actions or upload`, and publish content. The first synchronization loads all enabled sites; later synchronizations request entries changed after the cursor returned by Gitea.
-
-Use a service manager to inject the environment, restart the process, and retain `GITEA_PAGES_DATA_ROOT` across upgrades.
-
-## Publishing model
-
-Gitea accepts content from a configured branch and directory, an Actions deployment, or a web/API upload. All sources produce the same `tar.gz` artifact and version history. Pages instances download only the current version selected by Gitea.
-
-A valid artifact contains at least one regular file. An `index.html` file is useful for a conventional website but is not required: without one, the directory URL returns 404 while contained files remain available by path.
-
-Gitea and Pages both validate the archive. Pages verifies the digest again while downloading, extracts into a temporary directory, validates the resulting filesystem, removes executable permission bits from regular files, and publishes the candidate only after the selected serving mode confirms it. A failed candidate leaves the previous confirmed site active.
-
-## Serving modes
-
-| Mode | Command | Visitor entry point | Operational behavior |
-| --- | --- | --- | --- |
-| Standalone | `gitea-pages standalone` | Built-in Go HTTP/HTTPS server | Pages owns listeners, routing, TLS, and content responses. |
-| Nginx | `gitea-pages nginx` | Operator-managed Nginx | Pages writes content and configuration, runs test and reload commands, and probes the active virtual host. Nginx can continue serving the last confirmed deployment while Pages restarts. |
-
-### Standalone
-
-Standalone mode needs an HTTP listener. An HTTPS root URL also needs a separate HTTPS listener:
-
-```sh
-export GITEA_PAGES_HTTP_LISTEN=:80
-export GITEA_PAGES_HTTPS_LISTEN=:443
-
-./bin/gitea-pages standalone
-```
-
-The HTTP listener serves HTTP-01 challenges. For an HTTPS instance, known website hosts redirect ordinary HTTP requests to HTTPS.
-
-### Nginx
-
-Nginx mode writes a managed `pages.conf` include fragment, platform assets, route markers, configuration snapshots, and exported certificates below `GITEA_PAGES_NGINX_ROOT`. The include fragment belongs in the Nginx `http` context.
-
-Pages tests a candidate before replacing the confirmed configuration. The test command receives the candidate path through `{candidate}`; an operator wrapper can place that fragment into a complete Nginx configuration:
-
-```sh
-export GITEA_PAGES_NGINX_ROOT=/var/lib/gitea-pages-nginx
-export GITEA_PAGES_NGINX_HTTP_PROBE_ADDR=127.0.0.1:80
-export GITEA_PAGES_NGINX_TEST_COMMAND='["/usr/local/libexec/gitea-pages-nginx-test","{candidate}"]'
-export GITEA_PAGES_NGINX_RELOAD_COMMAND='["nginx","-s","reload"]'
-
-./bin/gitea-pages nginx
-```
-
-For HTTPS, also set `GITEA_PAGES_NGINX_HTTP01_ROOT` and `GITEA_PAGES_NGINX_HTTPS_PROBE_ADDR`. The Nginx worker needs read and traverse access to `sites/` and `route-state/` below `GITEA_PAGES_DATA_ROOT`; the embedded etcd directory remains private to the Pages process.
+The process handles `SIGINT` and `SIGTERM` with graceful HTTP and synchronization shutdown. Keep the configured data directory on persistent local storage and run one process against that directory.
 
 ## Configuration
 
-The command reads configuration from `GITEA_PAGES_` environment variables. URLs use standard HTTP or HTTPS ports, and managed directory paths are absolute. Pages checks that writable roots do not overlap because each root has a separate cleanup and permission boundary.
+The command reads one YAML file passed with `--config`. Parsing is strict: field names are checked and the file must contain exactly one YAML document. The following example runs an HTTP origin behind a reverse proxy while registering an HTTPS public address with Gitea:
 
-### Common settings
+```yaml
+gitea:
+  url: https://gitea.example.com
+  token: replace-with-the-instance-token
 
-| Variable | Required | Default | Description |
-| --- | --- | --- | --- |
-| `GITEA_PAGES_GITEA_URL` | Yes | — | Gitea HTTP or HTTPS root URL, without a path. |
-| `GITEA_PAGES_ROOT_URL` | Yes | — | Public Pages root URL, without a path or explicit port. |
-| `GITEA_PAGES_TOKEN` | Yes | — | Instance token created in Gitea administration. |
-| `GITEA_PAGES_DATA_ROOT` | Yes | — | Persistent root for embedded etcd, site content, work files, and route state. |
-| `GITEA_PAGES_SYNC_INTERVAL` | No | `1m` | Incremental synchronization interval; minimum `1m`. |
-| `GITEA_PAGES_DEPLOY_TIMEOUT` | No | `10m` | Maximum time for one deployment operation. |
-| `GITEA_PAGES_DEPLOY_QUEUE_SIZE` | No | `32` | Maximum number of queued repository deployments. |
-| `GITEA_PAGES_DEPLOY_CONCURRENCY` | No | `2` | Number of deployments processed concurrently. |
-| `GITEA_PAGES_ETCD_QUOTA_BYTES` | No | `2147483648` | Embedded etcd backend quota; minimum 64 MiB. |
-| `GITEA_PAGES_DNS_RESOLVER` | No | System resolver | Recursive DNS server for local ownership TXT checks, as an IP address with an optional port. |
-| `GITEA_PAGES_DNS_REFRESH_INTERVAL` | No | `15m` | Ownership TXT cache and refresh interval; allowed range `1m` to `24h`. |
-| `GITEA_PAGES_CUSTOM_ROOT` | No | — | Existing root containing custom platform resources and Nginx templates. |
+pages:
+  root_url: https://pages.example.com
+  data_root: /var/lib/gitea-pages
+  custom_root: /etc/gitea-pages/public
 
-### Serving mode settings
+server:
+  http_listen: 127.0.0.1:3000
+  https:
+    mode: proxy
 
-| Variable | Standalone | Nginx | Description |
-| --- | --- | --- | --- |
-| `GITEA_PAGES_HTTP_LISTEN` | Required | — | HTTP listen address and standalone HTTP-01 entry point. |
-| `GITEA_PAGES_HTTPS_LISTEN` | HTTPS | — | Standalone HTTPS listen address. |
-| `GITEA_PAGES_NGINX_ROOT` | — | Required | Nginx output root. |
-| `GITEA_PAGES_NGINX_HTTP01_ROOT` | — | HTTPS | Directory exposed by Nginx for HTTP-01 challenge files. |
-| `GITEA_PAGES_NGINX_HTTP_PROBE_ADDR` | — | Required | Local IP and port used to probe the HTTP virtual host. |
-| `GITEA_PAGES_NGINX_HTTPS_PROBE_ADDR` | — | HTTPS | Local IP and port used to probe the HTTPS virtual host. |
-| `GITEA_PAGES_NGINX_TEST_COMMAND` | — | Required | JSON string array containing `{candidate}` exactly once. |
-| `GITEA_PAGES_NGINX_RELOAD_COMMAND` | — | Required | JSON string array that reloads the confirmed Nginx configuration. |
-| `GITEA_PAGES_NGINX_COMMAND_TIMEOUT` | — | `30s` | Timeout for Nginx test and reload commands. |
+sync:
+  interval: 1m
+  deploy_timeout: 10m
+  queue_size: 32
+  concurrency: 2
 
-### HTTPS and ACME settings
+storage:
+  etcd_quota_bytes: 2147483648
 
-An HTTPS deployment needs either an operator-provided default certificate or an ACME directory with a DNS-01 provider for the default Pages domain. Automated custom-domain certificates use HTTP-01.
-
-| Variable | Required | Default | Description |
-| --- | --- | --- | --- |
-| `GITEA_PAGES_CERT_ROOT` | Certificate dependent | — | Operator certificate input root, separate from other managed roots. |
-| `GITEA_PAGES_ACME_DIRECTORY_URL` | To enable ACME | — | ACME directory endpoint. |
-| `GITEA_PAGES_ACME_EMAIL` | With ACME | — | ACME account contact email. |
-| `GITEA_PAGES_ACME_EAB_KID` | With EAB | — | External Account Binding key identifier. |
-| `GITEA_PAGES_ACME_EAB_HMAC_KEY` | With EAB | — | Base64url-encoded EAB HMAC key. |
-| `GITEA_PAGES_HTTP01_PROBE_ADDRESSES` | Custom-domain ACME | — | Comma-separated `IP:port` addresses checked before a custom-domain ACME order. |
-| `GITEA_PAGES_DNS_PROVIDER` | Default-domain DNS-01 | — | DNS-01 adapter name; currently `command`. |
-| `GITEA_PAGES_ACME_DNS_RESOLVER` | No | Ownership resolver | Recursive DNS server used by lego for zone discovery and propagation checks. |
-| `GITEA_PAGES_DNS_PRESENT_COMMAND` | Command provider | — | JSON string array containing `{name}` and `{value}` exactly once. |
-| `GITEA_PAGES_DNS_CLEANUP_COMMAND` | Command provider | — | JSON string array containing `{name}` and `{value}` exactly once. |
-
-The command DNS provider keeps provider-specific credentials outside Pages. The service manager supplies those credentials to the configured commands; lego continues to own ACME account and order handling.
-
-When several Pages instances serve the same custom domain, the HTTP entry point must route each `/.well-known/acme-challenge/` request to the instance currently performing the order. If it reaches another instance, the preflight or CA validation fails and that instance keeps the custom address unpublished until a later retry.
-
-## Operator certificates
-
-The default certificate uses these paths:
-
-```text
-<GITEA_PAGES_CERT_ROOT>/default/fullchain.pem
-<GITEA_PAGES_CERT_ROOT>/default/privkey.pem
+domains:
+  resolver: 1.1.1.1
+  refresh_interval: 15m
 ```
 
-A custom-domain certificate uses the SHA-256 digest of its lowercase host as the directory name:
+### HTTPS ownership
 
-```text
-<GITEA_PAGES_CERT_ROOT>/hosts/<sha256>/host
-<GITEA_PAGES_CERT_ROOT>/hosts/<sha256>/fullchain.pem
-<GITEA_PAGES_CERT_ROOT>/hosts/<sha256>/privkey.pem
+`server.https.mode` states which component owns the public HTTPS connection:
+
+| Mode | Public root URL | Local listeners | Certificate behavior |
+| --- | --- | --- | --- |
+| `disabled` | `http://…` | `server.http_listen` | Serves plain HTTP. |
+| `proxy` | `https://…` | `server.http_listen` | Serves plain HTTP to a reverse proxy. Pages confirms deployments through the local HTTP listener. |
+| `pages` | `https://…` | HTTP and HTTPS listeners | Pages terminates TLS, serves HTTP-01, manages certificates, and redirects known HTTP hosts to HTTPS. |
+
+The reverse proxy must preserve the original `Host`. It owns external TLS and health checks; Pages does not initialize ACME or inspect the proxy certificate in `proxy` mode.
+
+### Pages-managed HTTPS
+
+This example enables native HTTPS and ACME:
+
+```yaml
+server:
+  http_listen: :80
+  https:
+    mode: pages
+    listen: :443
+    certificate_root: /etc/gitea-pages/certificates
+    acme:
+      directory_url: https://acme-v02.api.letsencrypt.org/directory
+      email: pages@example.com
+      eab:
+        kid: ""
+        hmac_key: ""
+      dns01:
+        resolver: 1.1.1.1
+        provider: cloudflare
+        parameters:
+          CLOUDFLARE_DNS_API_TOKEN_FILE: /run/secrets/cloudflare-dns-token
+          CLOUDFLARE_ZONE_API_TOKEN_FILE: /run/secrets/cloudflare-zone-token
+      http01:
+        probe_addresses:
+          - 127.0.0.1:80
 ```
 
-The `host` file contains the lowercase domain name. Pages validates certificate names, validity, and key pairs before use. Nginx mode exports accepted certificates below `<GITEA_PAGES_NGINX_ROOT>/certs`.
+`provider` is a [lego DNS provider code](https://go-acme.github.io/lego/dns/). `parameters` uses that provider's documented environment-variable names while keeping the Pages configuration in YAML. Values are strings, and lego's `_FILE` suffix can reference a file containing a credential. Pages applies the parameters only while lego constructs the provider, restores the previous process environment, and then reuses the provider for issuance and renewal. Provider parameters are never stored in embedded etcd or reported to Gitea.
 
-## Custom platform resources
+Pages uses DNS-01 only for the default root and wildcard certificate. Custom domains use HTTP-01 after every configured probe address returns the exact challenge response without a redirect. For a DNS service that is not built into lego, use the lego `exec` provider with `EXEC_PATH` and optionally `EXEC_MODE`; lego calls that program for both record creation and cleanup.
 
-`GITEA_PAGES_CUSTOM_ROOT` can replace the bundled Pages landing page, error page, assets, and Nginx templates:
+The standard build includes lego's provider registry so the provider can be selected at runtime. A smaller custom build can use lego's official build tags:
 
-```text
-public/index.html
-public/errors/404.html
-public/assets/
-nginx/pages.conf.tmpl
-nginx/server.inc
-nginx/location.inc
+```sh
+go build -tags "lego_dnslight lego_dns_cloudflare lego_dns_route53 lego_dns_exec" -o gitea-pages ./cmd
 ```
 
-Files not supplied by the custom root continue to use their bundled versions. Platform resources remain separate from repository website content so an operator can change service-wide presentation without modifying published artifacts.
+With a lightweight build, selecting a provider that was not included produces a startup error.
 
-## Use as a Go package
+`certificate_root` is optional. When present, Pages reads operator-managed certificates from this structure:
 
-The root package exposes the synchronization service and the publication boundary while keeping protocol, storage, etcd, certificate, and ACME records internal.
+```text
+<certificate-root>/default/fullchain.pem
+<certificate-root>/default/privkey.pem
+<certificate-root>/hosts/<sha256-of-lowercase-host>/host
+<certificate-root>/hosts/<sha256-of-lowercase-host>/fullchain.pem
+<certificate-root>/hosts/<sha256-of-lowercase-host>/privkey.pem
+```
 
-Command integrations can call `page.LoadConfig(page.ModeStandalone)` or `page.LoadConfig(page.ModeNginx)` to read the matching environment variables. Library integrations may construct `page.Config` directly; the selected built-in publisher uses its own listener or Nginx probe addresses, while a custom publisher owns its own entry point.
+The `host` file contains the lowercase domain. Pages validates the certificate names, validity period, and private key before use. ACME certificates and account state are stored in embedded etcd.
+
+### Configuration reference
+
+| YAML field | Default | Purpose |
+| --- | --- | --- |
+| `gitea.url` | required | Gitea HTTP or HTTPS root URL. |
+| `gitea.token` | required | Bearer token for this registered Pages instance. |
+| `pages.root_url` | required | Public Pages root URL on the standard HTTP or HTTPS port. |
+| `pages.data_root` | required | Absolute persistent root for etcd, site content, work files, and the process lock. |
+| `pages.custom_root` | empty | Absolute directory containing replacement platform resources. |
+| `server.http_listen` | required | Built-in HTTP listener and HTTP origin for proxy mode. |
+| `server.https.mode` | required | `disabled`, `proxy`, or `pages`. |
+| `server.https.listen` | required for `pages` | Native HTTPS listener. |
+| `server.https.certificate_root` | empty | Absolute operator-certificate directory, separate from `pages.data_root`. |
+| `server.https.acme.directory_url` | empty | ACME directory URL. |
+| `server.https.acme.email` | empty | ACME account contact; required with a directory URL. |
+| `server.https.acme.eab.kid` | empty | External Account Binding key identifier. |
+| `server.https.acme.eab.hmac_key` | empty | Base64url EAB HMAC key; configured with `kid`. |
+| `server.https.acme.dns01.resolver` | domain resolver | Recursive resolver for lego zone discovery and propagation checks. |
+| `server.https.acme.dns01.provider` | empty | lego provider code for the default root and wildcard certificate. |
+| `server.https.acme.dns01.parameters` | empty | String parameters named exactly as documented by the selected lego provider. |
+| `server.https.acme.http01.probe_addresses` | empty | IP and port addresses checked before custom-domain validation. |
+| `sync.interval` | `1m` | Incremental synchronization interval; minimum `1m`. |
+| `sync.deploy_timeout` | `10m` | Maximum duration of one deployment. |
+| `sync.queue_size` | `32` | Number of repositories in the deployment queue. |
+| `sync.concurrency` | `2` | Concurrent deployment workers. |
+| `storage.etcd_quota_bytes` | `2147483648` | Embedded etcd quota; minimum 64 MiB. |
+| `domains.resolver` | system resolver | Recursive resolver for local ownership TXT checks. |
+| `domains.refresh_interval` | `15m` | Local TXT refresh interval from `1m` through `24h`. |
+
+Resolver values are IP addresses with an optional port. IPv6 addresses without a port use their plain form; addresses with a port use the standard bracketed form.
+
+### Custom platform resources
+
+`pages.custom_root` overlays the embedded platform resources directly:
+
+```text
+<custom-root>/index.html
+<custom-root>/errors/404.html
+<custom-root>/assets/**
+```
+
+Files use the same relative paths as the embedded resources. Pages checks the root and all entries at startup, accepts regular files only, and limits the custom set to 1,000 files and 16 MiB.
+
+## Use as a Go module
+
+Implement `page.Publisher` to connect the deployment pipeline to another web server:
 
 ```go
-import page "gitea.dev/page"
+type Publisher interface {
+    Restore(context.Context, Deployments) error
+    Publish(context.Context, Deployment) (Publication, error)
+    Unpublish(context.Context, int64) error
+}
+```
 
-service, err := page.NewService(cfg, publisher,
-	page.WithLogger(logger),
-	page.WithHTTPClient(httpClient),
-)
+```go
+cfg, err := page.LoadConfig("/etc/gitea-pages/config.yaml")
 if err != nil {
-	return err
+    return err
+}
+
+service, err := page.NewService(cfg, publisher, page.WithLogger(logger))
+if err != nil {
+    return err
 }
 defer service.Close()
 
 return service.Run(ctx)
 ```
 
-Implement `page.Publisher` to connect another web server:
+`Content` exposes an immutable directory through `Open`, `Path`, and `Digest`. A publisher may retain it until a later successful publish or unpublish for the same repository. Calls for one repository are serialized; different repositories may be published concurrently. A failed `Publish` must restore its previous route before returning the error so the service can preserve the last confirmed content.
 
-```go
-type Publisher interface {
-	Restore(context.Context, Deployments) error
-	Publish(context.Context, Deployment) (Publication, error)
-	Unpublish(context.Context, int64) error
-}
+Constructing `page.Config` directly is supported for embedded applications. `page.LoadConfig` additionally validates the built-in server fields used by `page.Run`.
+
+## Local data
+
+```text
+<data-root>/etcd/                         embedded etcd state
+<data-root>/sites/<repo-id>/content-*     immutable extracted sites
+<data-root>/work/                         temporary downloads and extraction
+<data-root>/pages.lock                    single-process lock
 ```
 
-`Restore` receives an iterator over confirmed local deployments. `Publish` receives the repository ID, public addresses, and immutable validated content. `Content.Open` satisfies `fs.FS`, while `Content.Path` exposes the extracted directory for servers that require a filesystem path.
+The work directory is recreated after the process acquires the data-root lock, removing incomplete downloads left by an interrupted run. Confirmed site directories remain available. Clearing the data root causes the next start to perform a complete Gitea query and redeploy all enabled sites.
 
-Calls for one repository are serialized; different repositories may be published concurrently. A publisher that returns an error from `Publish` restores the previous route before returning. The content remains valid until a later `Publish` or `Unpublish` for the same repository succeeds.
+## Security model
 
-The service continues to own Gitea registration, synchronization, download and digest checks, archive validation, extraction, TXT ownership checks, and result reporting. The custom publisher owns its HTTP/TLS lifecycle and confirms which addresses are active.
-
-## Operations and recovery
-
-- Keep `GITEA_PAGES_DATA_ROOT` on persistent local storage and use it from one Pages process at a time.
-- Embedded etcd stores synchronization state, deployment facts, certificate material, and pending reports without binding a public port.
-- Normal restarts restore confirmed routes from local state before processing new updates.
-- When Gitea is unavailable, confirmed sites keep serving and deployment reports remain pending locally.
-- Nginx keeps using the last successfully loaded configuration and site files when the Pages process is stopped.
-- To rebuild a damaged local state, stop the process, clear its data root, and restart it. An empty state performs a full synchronization and redeploys every enabled site.
-
-Archive limits and the custom-domain ownership requirement come from Gitea during synchronization. A changed limit applies the next time content is deployed; it does not rewrite an already confirmed site.
-
-## Security
-
-Publication artifacts are untrusted input. Gitea validates each upload before storage, and Pages validates it again during extraction. The checks cover compressed input bounds, expanded size, entry count, path length and depth, absolute and traversal paths, duplicate normalized names, unsafe entry types, link resolution, extraction timeout, and final filesystem contents.
-
-Relative symbolic links are accepted when their resolved path remains inside the site directory, including the site root and targets absent from the artifact. Absolute links, escaping links, hard links, devices, sockets, and other special entries fail the deployment. Regular files are published without executable permission bits.
-
-Custom-domain ownership can be enforced independently by Gitea and each Pages instance. After a successful TXT check, an existing route receives a 24-hour grace period for later mismatches or resolver failures. A new domain becomes eligible only after its first successful check. Pages also verifies local HTTP-01 reachability before creating an ACME order, which reduces avoidable CA rate-limit failures.
-
-ACME account keys, certificate private keys, DNS command credentials, extracted content, and embedded etcd state remain on the Pages host. Protect the data, certificate, and command environment with operating-system permissions appropriate for the service account.
+- Every artifact is downloaded through the authenticated Gitea endpoint and checked against its SHA-256 digest.
+- Extraction rejects absolute paths, path traversal, hard links, special files, unsafe link targets, excessive depth, and configured resource-limit violations.
+- Accepted relative symbolic links remain confined to the site root; executable permission bits are cleared from extracted regular files.
+- Visitor requests read only confirmed immutable directories and never trigger synchronization or extraction.
+- Instance tokens and DNS provider credentials should be readable only by the service account.
 
 ## Development
 
-Run the complete local verification before submitting a change:
-
 ```sh
 make format
-make tidy
 make check
-make build
 ```
 
-`make check` verifies formatting, runs `go vet`, executes the complete test suite, and builds every package.
-
-The repository layout keeps the reusable API separate from runtime details:
-
-```text
-page.go                     Public `gitea.dev/page` API
-cmd/main.go                 Process entry point and signal context
-cmd/root.go                 Cobra root command
-cmd/standalone/             Standalone process lifecycle
-cmd/nginx/                  Nginx process assembly
-internal/runtime/           Synchronization, storage, validation, TLS, and publishers
-internal/runtime/resources/ Bundled platform pages and assets
-```
-
-Issues and pull requests should include the behavior being changed and the verification used to confirm it.
+`make check` runs formatting verification, `go vet`, the complete Go test suite, and a full build.
 
 ## License
 

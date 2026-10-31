@@ -6,7 +6,6 @@ package runtime
 import (
 	"context"
 	"net"
-	"strings"
 	"testing"
 	"time"
 
@@ -43,68 +42,19 @@ func startTestDNSServer(t *testing.T, handler dns.Handler) string {
 
 type fakeDNS struct {
 	records map[string]string
-	cleaned bool
 }
 
-func (d *fakeDNS) Present(_ context.Context, n, v string) error {
+func (d *fakeDNS) Present(ctx context.Context, domain, _ string, keyAuth string) error {
 	if d.records == nil {
 		d.records = map[string]string{}
 	}
-	d.records[n] = v
+	d.records[domain] = dns01.GetChallengeInfo(ctx, domain, keyAuth).Value
 	return nil
 }
 
-func (d *fakeDNS) Cleanup(_ context.Context, n, v string) error {
-	if d.records[n] == v {
-		delete(d.records, n)
-	}
-	d.cleaned = true
+func (d *fakeDNS) CleanUp(_ context.Context, domain, _, _ string) error {
+	delete(d.records, domain)
 	return nil
-}
-
-func TestCommandDNSProviderUsesChallengeValues(t *testing.T) {
-	p := commandDNSProvider{PresentCommand: []string{"/bin/sh", "-c", "test '{name}' = '_acme-challenge.example' && test '{value}' = 'value'"}, CleanupCommand: []string{"/bin/sh", "-c", "test '{name}' = '_acme-challenge.example' && test '{value}' = 'value'"}}
-	if err := p.Present(context.Background(), "_acme-challenge.example", "value"); err != nil {
-		t.Fatal(err)
-	}
-	if err := p.Cleanup(context.Background(), "_acme-challenge.example", "value"); err != nil {
-		t.Fatal(err)
-	}
-}
-
-func TestNewDNS01ProviderRequiresConfiguredCommands(t *testing.T) {
-	if _, err := newDNS01Provider("command", nil, nil); err == nil {
-		t.Fatal("empty command provider was accepted")
-	}
-	provider, err := newDNS01Provider("command", []string{"/bin/true"}, []string{"/bin/true"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := provider.Present(context.Background(), "_acme-challenge.example", "value"); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := newDNS01Provider("unknown", []string{"/bin/true"}, []string{"/bin/true"}); err == nil {
-		t.Fatal("unknown DNS provider was accepted")
-	}
-}
-
-func TestLegoDNSProviderUsesChallengeRecord(t *testing.T) {
-	d := &fakeDNS{}
-	p := dnsChallengeProvider{provider: d}
-	if err := p.Present(context.Background(), "example.com", "token", "key-auth"); err != nil {
-		t.Fatal(err)
-	}
-	info := dns01.GetChallengeInfo(context.Background(), "example.com", "key-auth")
-	name := strings.TrimSuffix(info.FQDN, ".")
-	if d.records[name] != info.Value {
-		t.Fatalf("DNS record = %q, want %q", d.records[name], info.Value)
-	}
-	if err := p.CleanUp(context.Background(), "example.com", "token", "key-auth"); err != nil {
-		t.Fatal(err)
-	}
-	if len(d.records) != 0 {
-		t.Fatalf("DNS records remain after lego cleanup: %#v", d.records)
-	}
 }
 
 func TestVerifyTXTResultUsesConfiguredResolver(t *testing.T) {
@@ -170,47 +120,5 @@ func TestACMEManagerUsesConfiguredDNSResolver(t *testing.T) {
 	}
 	if _, err := dns01.DefaultClient().FindZoneByFqdn(t.Context(), "example.test."); err != nil {
 		t.Fatalf("configured ACME DNS resolver was not used: %v", err)
-	}
-}
-
-func TestDNSChallengeCleanupAfterRestart(t *testing.T) {
-	root := t.TempDir()
-	store, err := openStore(root, defaultEtcdQuotaBytes)
-	if err != nil {
-		t.Fatal(err)
-	}
-	dns := &fakeDNS{}
-	adapter := dnsChallengeProvider{provider: dns, store: store}
-	if err := adapter.Present(context.Background(), "example.test", "token", "key-auth"); err != nil {
-		t.Fatal(err)
-	}
-	if len(dns.records) != 1 {
-		t.Fatalf("challenge not published: %#v", dns.records)
-	}
-	store.close()
-	store, err = openStore(root, defaultEtcdQuotaBytes)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer store.close()
-	manager, err := newACMEManager(store, "http://127.0.0.1:1/directory", "pages@example.test", "")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := manager.cleanupDNS(context.Background(), dns); err != nil {
-		t.Fatal(err)
-	}
-	if len(dns.records) != 0 || !dns.cleaned {
-		t.Fatalf("stale DNS challenge survived cleanup: %#v", dns.records)
-	}
-	remaining := 0
-	if err := store.kv.listPrefix(context.Background(), "/gitea-pages/acme/dns/", func(string, []byte) error {
-		remaining++
-		return nil
-	}); err != nil {
-		t.Fatal(err)
-	}
-	if remaining != 0 {
-		t.Fatalf("%d pending challenges remain in etcd", remaining)
 	}
 }

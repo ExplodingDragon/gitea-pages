@@ -13,11 +13,9 @@ import (
 	"crypto/x509"
 	"encoding/base64"
 	"encoding/hex"
-	"encoding/json"
 	"encoding/pem"
 	"errors"
 	"fmt"
-	"os/exec"
 	"strings"
 	"sync"
 	"time"
@@ -31,53 +29,10 @@ import (
 	"github.com/go-acme/lego/v5/registration"
 )
 
-// dns01Provider manages the DNS records requested by lego.
-type dns01Provider interface {
-	Present(context.Context, string, string) error
-	Cleanup(context.Context, string, string) error
-}
-
 // challengeResponder exposes HTTP-01 tokens through the active serving mode.
 type challengeResponder interface {
 	setChallenge(string, string, string)
 	clearChallenge(string, string)
-}
-
-// commandDNSProvider delegates DNS record changes to operator-provided commands.
-type commandDNSProvider struct{ PresentCommand, CleanupCommand []string }
-
-// newDNS01Provider keeps provider credentials outside the Pages state. The
-// service manager supplies them through the command environment, so adding a
-// deployment-specific DNS integration does not change certificate handling.
-func newDNS01Provider(name string, present, cleanup []string) (dns01Provider, error) {
-	switch strings.ToLower(strings.TrimSpace(name)) {
-	case "", "command":
-		if len(present) == 0 || len(cleanup) == 0 {
-			return nil, errors.New("DNS command provider requires present and cleanup commands")
-		}
-		return commandDNSProvider{PresentCommand: present, CleanupCommand: cleanup}, nil
-	default:
-		return nil, fmt.Errorf("unsupported DNS-01 provider %q", name)
-	}
-}
-
-func (p commandDNSProvider) Present(ctx context.Context, name, value string) error {
-	return runDNSCommand(ctx, p.PresentCommand, name, value)
-}
-
-func (p commandDNSProvider) Cleanup(ctx context.Context, name, value string) error {
-	return runDNSCommand(ctx, p.CleanupCommand, name, value)
-}
-
-func runDNSCommand(ctx context.Context, command []string, name, value string) error {
-	if len(command) == 0 {
-		return errors.New("DNS provider command is not configured")
-	}
-	args := make([]string, len(command))
-	for i, v := range command {
-		args[i] = strings.ReplaceAll(strings.ReplaceAll(v, "{name}", name), "{value}", value)
-	}
-	return exec.CommandContext(ctx, args[0], args[1:]...).Run()
 }
 
 // acmeManager owns the persisted lego account and certificate requests.
@@ -228,67 +183,6 @@ func (p httpChallengeProvider) CleanUp(_ context.Context, domain, token, _ strin
 	return nil
 }
 
-type dnsChallengeProvider struct {
-	provider dns01Provider
-	store    *store
-}
-
-type pendingDNSChallenge struct {
-	Name  string `json:"name"`
-	Value string `json:"value"`
-}
-
-func dnsChallengeKey(name, value string) string {
-	sum := sha256.Sum256([]byte(name + "\x00" + value))
-	return "/gitea-pages/acme/dns/" + hex.EncodeToString(sum[:])
-}
-
-func (p dnsChallengeProvider) Present(ctx context.Context, domain, _, keyAuth string) error {
-	info := dns01.GetChallengeInfo(ctx, domain, keyAuth)
-	name := strings.TrimSuffix(info.FQDN, ".")
-	if p.store != nil {
-		if err := p.store.kv.put(ctx, dnsChallengeKey(name, info.Value), pendingDNSChallenge{Name: name, Value: info.Value}); err != nil {
-			return err
-		}
-	}
-	return p.provider.Present(ctx, name, info.Value)
-}
-
-func (p dnsChallengeProvider) CleanUp(ctx context.Context, domain, _, keyAuth string) error {
-	info := dns01.GetChallengeInfo(ctx, domain, keyAuth)
-	name := strings.TrimSuffix(info.FQDN, ".")
-	if err := p.provider.Cleanup(ctx, name, info.Value); err != nil {
-		return err
-	}
-	if p.store != nil {
-		return p.store.kv.delete(ctx, dnsChallengeKey(name, info.Value))
-	}
-	return nil
-}
-
-func (m *acmeManager) cleanupDNS(ctx context.Context, provider dns01Provider) error {
-	var pending []pendingDNSChallenge
-	if err := m.store.kv.listPrefix(ctx, "/gitea-pages/acme/dns/", func(_ string, value []byte) error {
-		var item pendingDNSChallenge
-		if err := json.Unmarshal(value, &item); err != nil {
-			return err
-		}
-		pending = append(pending, item)
-		return nil
-	}); err != nil {
-		return err
-	}
-	for _, item := range pending {
-		if err := provider.Cleanup(ctx, item.Name, item.Value); err != nil {
-			return err
-		}
-		if err := m.store.kv.delete(ctx, dnsChallengeKey(item.Name, item.Value)); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
 func randomChallengeToken() (string, error) {
 	b := make([]byte, 24)
 	if _, err := rand.Read(b); err != nil {
@@ -323,7 +217,7 @@ func (m *acmeManager) issueHTTP01(ctx context.Context, host string, server chall
 	})
 }
 
-func (m *acmeManager) issueDNS01(ctx context.Context, names []string, provider dns01Provider) (certificateRecord, error) {
+func (m *acmeManager) issueDNS01(ctx context.Context, names []string, provider challenge.Provider) (certificateRecord, error) {
 	if provider == nil {
 		return certificateRecord{}, errors.New("DNS-01 provider is not configured")
 	}
@@ -333,15 +227,12 @@ func (m *acmeManager) issueDNS01(ctx context.Context, names []string, provider d
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return m.issue(ctx, acmeRetryKey("dns01", names[0]), names, func(c *lego.Client) error {
-		if err := m.cleanupDNS(ctx, provider); err != nil {
-			return err
-		}
-		return c.Challenge.SetDNS01Provider(dnsChallengeProvider{provider: provider, store: m.store})
+		return c.Challenge.SetDNS01Provider(provider)
 	})
 }
 
 // issue serializes local certificate work and keeps the retry deadline when a
-// CA rejects an order. The provider itself remains a thin adapter to lego.
+// CA rejects an order.
 func (m *acmeManager) issue(ctx context.Context, retryKey string, names []string, setProvider func(*lego.Client) error) (certificateRecord, error) {
 	var retry acmeRetryState
 	_, err := m.store.kv.get(ctx, retryKey, &retry)
@@ -393,7 +284,7 @@ func (m *acmeManager) recordFailure(key string, state acmeRetryState, issueErr e
 	return issueErr
 }
 
-func (m *acmeManager) issueDefaultDNS01(ctx context.Context, rootHost string, provider dns01Provider) (certificateRecord, error) {
+func (m *acmeManager) issueDefaultDNS01(ctx context.Context, rootHost string, provider challenge.Provider) (certificateRecord, error) {
 	rootHost = strings.ToLower(strings.TrimSuffix(strings.TrimSpace(rootHost), "."))
 	if rootHost == "" {
 		return certificateRecord{}, errors.New("default Pages host is empty")
@@ -449,4 +340,3 @@ func certificateRecordFromResource(resource *certificate.Resource, host string) 
 }
 
 var _ challenge.Provider = httpChallengeProvider{}
-var _ challenge.Provider = dnsChallengeProvider{}

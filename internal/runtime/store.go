@@ -107,12 +107,14 @@ func openStore(root string, quotaBytes int64) (*store, error) {
 			s.close()
 		}
 	}()
-	for _, dir := range []string{filepath.Join(root, "sites"), filepath.Join(root, "work")} {
-		if err := os.MkdirAll(dir, 0o755); err != nil {
-			return nil, err
-		}
+	if err := os.MkdirAll(filepath.Join(root, "sites"), 0o755); err != nil {
+		return nil, err
 	}
-	if err := os.Chmod(filepath.Join(root, "work"), 0o700); err != nil {
+	workRoot := filepath.Join(root, "work")
+	if err := os.RemoveAll(workRoot); err != nil {
+		return nil, fmt.Errorf("clean deployment work directory: %w", err)
+	}
+	if err := os.Mkdir(workRoot, 0o700); err != nil {
 		return nil, err
 	}
 	kv, err := startEmbeddedKV(root, quotaBytes)

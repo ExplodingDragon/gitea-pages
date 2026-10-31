@@ -1,9 +1,7 @@
 // Copyright 2026 The Gitea Authors. All rights reserved.
 // SPDX-License-Identifier: MIT
 
-// Package standalone defines the command that serves Pages directly from the
-// Go process.
-package standalone
+package runtime
 
 import (
 	"context"
@@ -14,36 +12,7 @@ import (
 	"net/http"
 	"sync"
 	"time"
-
-	"github.com/spf13/cobra"
-
-	"gitea.dev/page"
 )
-
-// NewCommand creates the standalone serving command.
-func NewCommand() *cobra.Command {
-	return &cobra.Command{
-		Use:   "standalone",
-		Short: "Serve sites directly over HTTP and HTTPS",
-		Args:  cobra.NoArgs,
-		RunE: func(cmd *cobra.Command, _ []string) error {
-			cfg, err := page.LoadConfig(page.ModeStandalone)
-			if err != nil {
-				return err
-			}
-			publisher, err := page.NewStandalonePublisher(cfg)
-			if err != nil {
-				return err
-			}
-			service, err := page.NewService(cfg, publisher)
-			if err != nil {
-				return err
-			}
-			defer service.Close()
-			return serve(cmd.Context(), cfg, publisher, service)
-		},
-	}
-}
 
 type readyListener struct {
 	net.Listener
@@ -56,21 +25,34 @@ func (l *readyListener) Accept() (net.Conn, error) {
 	return l.Listener.Accept()
 }
 
-func serve(ctx context.Context, cfg page.Config, publisher *page.StandalonePublisher, service *page.Service) error {
+// Run starts the built-in HTTP publisher and synchronization service.
+func Run(ctx context.Context, cfg Config, options ...Option) error {
+	cfg.applyDefaults()
+	if err := cfg.validateBuiltInServer(); err != nil {
+		return err
+	}
+	publisher, err := newHTTPPublisher(cfg)
+	if err != nil {
+		return err
+	}
+	service, err := NewService(cfg, publisher, options...)
+	if err != nil {
+		return err
+	}
+	defer service.Close()
+
 	httpListener, err := net.Listen("tcp", cfg.HTTPListen)
 	if err != nil {
 		return fmt.Errorf("listen Pages HTTP: %w", err)
 	}
-	servers := make([]*http.Server, 0, 2)
+	servers := []*http.Server{{Handler: publisher.Handler(false), ReadHeaderTimeout: 10 * time.Second}}
 	ready := make(chan struct{}, 2)
 	listeners := []net.Listener{&readyListener{Listener: httpListener, ready: ready}}
-	servers = append(servers, &http.Server{Handler: publisher.Handler(false), ReadHeaderTimeout: 10 * time.Second})
-
-	if cfg.RootURL.Scheme == "https" {
+	if cfg.HTTPSMode == HTTPSPages {
 		tlsConfig := service.TLSConfig()
 		if tlsConfig == nil {
 			_ = httpListener.Close()
-			return errors.New("HTTPS standalone server requires certificate services")
+			return errors.New("pages HTTPS requires certificate services")
 		}
 		httpsListener, listenErr := net.Listen("tcp", cfg.HTTPSListen)
 		if listenErr != nil {

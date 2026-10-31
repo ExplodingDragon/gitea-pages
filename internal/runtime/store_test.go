@@ -43,7 +43,7 @@ func TestStorePersistsPerSiteStateAndPendingReport(t *testing.T) {
 		t.Fatal(err)
 	}
 	if info.Mode().Perm()&0o111 != 0o111 {
-		t.Fatalf("published site root cannot be traversed by an external Nginx user: %v", info.Mode())
+		t.Fatalf("published site root cannot be traversed by the web service: %v", info.Mode())
 	}
 	if applied, err := s.saveDeploymentResult(site, site.TarGzSHA256, true, false); err != nil || !applied {
 		t.Fatal(err)
@@ -93,8 +93,15 @@ func TestStorePersistsPerSiteStateAndPendingReport(t *testing.T) {
 	}
 }
 
-func TestOpenStoreProtectsPrivateDirectories(t *testing.T) {
+func TestOpenStorePreparesPrivateDirectories(t *testing.T) {
 	root := t.TempDir()
+	abandonedWork := filepath.Join(root, "work", "42-abandoned", "content")
+	if err := os.MkdirAll(abandonedWork, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(abandonedWork, "index.html"), []byte("stale"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 	s, err := openStore(root, defaultEtcdQuotaBytes)
 	if err != nil {
 		t.Fatal(err)
@@ -108,6 +115,13 @@ func TestOpenStoreProtectsPrivateDirectories(t *testing.T) {
 		if info.Mode().Perm() != 0o700 {
 			t.Fatalf("%s directory mode = %o, want 700", name, info.Mode().Perm())
 		}
+	}
+	workEntries, err := os.ReadDir(filepath.Join(root, "work"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(workEntries) != 0 {
+		t.Fatalf("deployment work directory contains stale entries: %v", workEntries)
 	}
 	info, err := os.Stat(filepath.Join(root, "sites"))
 	if err != nil {
