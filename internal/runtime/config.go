@@ -89,10 +89,10 @@ func LoadConfig(path string) (Config, error) {
 		}
 		return Config{}, fmt.Errorf("decode Pages config: %w", err)
 	}
-	return raw.runtimeConfig()
+	return raw.toConfig()
 }
 
-func (raw fileConfig) runtimeConfig() (Config, error) {
+func (raw fileConfig) toConfig() (Config, error) {
 	var cfg Config
 	var err error
 	cfg.GiteaURL, err = parseRootURL("gitea.url", raw.Gitea.URL)

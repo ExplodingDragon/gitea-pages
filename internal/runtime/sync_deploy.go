@@ -113,7 +113,7 @@ func (s *syncer) publishSite(ctx context.Context, site site, content Content) er
 	}
 	publication, err := s.publisher.Publish(ctx, deployment)
 	if err != nil {
-		_ = s.store.discardUnpublishedContent(site.RepoID, site.TarGzSHA256)
+		_ = s.store.removeCandidateContent(site.RepoID, site.TarGzSHA256)
 		return s.reportDeploymentFailure(ctx, site, instanceErrorRouteApplyFailed, err)
 	}
 	if publication.Problem != "" && errorCode == "" {
@@ -133,7 +133,7 @@ func (s *syncer) publishSite(ctx context.Context, site site, content Content) er
 	if !applied {
 		return nil
 	}
-	if err := s.store.cleanupSupersededContent(site.RepoID, site.TarGzSHA256); err != nil {
+	if err := s.store.removeSupersededContent(site.RepoID, site.TarGzSHA256); err != nil {
 		s.logger.Error("cleaning superseded Pages content failed", "repo_id", site.RepoID, "error", err)
 	}
 	return s.reportResult(ctx, site, site.TarGzSHA256, true, publication.DefaultPublished, publication.CustomPublished, errorCode)

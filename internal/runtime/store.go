@@ -212,10 +212,10 @@ func openStore(root string, quotaBytes int64) (*store, error) {
 				return nil, err
 			}
 		}
-		_ = s.cleanupSupersededContent(local.Site.RepoID, local.InstalledDigest)
+		_ = s.removeSupersededContent(local.Site.RepoID, local.InstalledDigest)
 	}
 	if !fullSyncMarkerPresent {
-		_ = s.cleanupUntrackedContent()
+		_ = s.removeUntrackedContent()
 	}
 	opened = true
 	return s, nil

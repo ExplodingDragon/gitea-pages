@@ -78,7 +78,7 @@ func (s *store) installedContent(repoID int64, digest string) (Content, bool) {
 	return Content{digest: digest, root: filepath.Join(s.siteDir(repoID), "content-"+digest)}, true
 }
 
-func (s *store) discardUnpublishedContent(repoID int64, digest string) error {
+func (s *store) removeCandidateContent(repoID int64, digest string) error {
 	local, ok := s.getSite(repoID)
 	if ok && local.InstalledDigest == digest {
 		return nil
@@ -89,7 +89,7 @@ func (s *store) discardUnpublishedContent(repoID int64, digest string) error {
 	return os.RemoveAll(filepath.Join(s.siteDir(repoID), "content-"+digest))
 }
 
-func (s *store) cleanupSupersededContent(repoID int64, digest string) error {
+func (s *store) removeSupersededContent(repoID int64, digest string) error {
 	if !isSHA256Digest(digest) {
 		return nil
 	}
@@ -114,11 +114,11 @@ func (s *store) cleanupSupersededContent(repoID int64, digest string) error {
 	return cleanupErr
 }
 
-// cleanupUntrackedContent retries removal of stale content and site directories
+// removeUntrackedContent retries removal of stale content and site directories
 // whose repository record is no longer in the completed Gitea listing. It runs
 // at startup and after a successful full sync, so a transient filesystem error
 // can recover without adding another persistent cleanup queue.
-func (s *store) cleanupUntrackedContent() error {
+func (s *store) removeUntrackedContent() error {
 	s.mu.RLock()
 	tracked := make(map[int64]struct{}, len(s.state.sites))
 	trackedSites := make([]localSite, 0, len(s.state.sites))
@@ -129,7 +129,7 @@ func (s *store) cleanupUntrackedContent() error {
 	s.mu.RUnlock()
 	var cleanupErr error
 	for _, site := range trackedSites {
-		if err := s.cleanupSupersededContent(site.Site.RepoID, site.InstalledDigest); err != nil && cleanupErr == nil {
+		if err := s.removeSupersededContent(site.Site.RepoID, site.InstalledDigest); err != nil && cleanupErr == nil {
 			cleanupErr = err
 		}
 	}

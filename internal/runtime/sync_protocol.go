@@ -148,7 +148,7 @@ func (s *syncer) syncAllSites(ctx context.Context) error {
 	if err := s.store.replaceSites(rootURL, rootTime, until, listing, limits, requireGiteaTXT); err != nil {
 		return err
 	}
-	if err := s.store.cleanupUntrackedContent(); err != nil {
+	if err := s.store.removeUntrackedContent(); err != nil {
 		s.logger.Error("cleaning untracked Pages content failed", "error", err)
 	}
 	s.requireGiteaTXT.Store(requireGiteaTXT)
@@ -157,7 +157,7 @@ func (s *syncer) syncAllSites(ctx context.Context) error {
 			continue
 		}
 		if err := s.store.clearPendingReport(report.RepoID, report); err != nil {
-			s.logger.Error("cleaning obsolete Pages report failed", "repo_id", report.RepoID, "error", err)
+			s.logger.Error("cleaning stale Pages report failed", "repo_id", report.RepoID, "error", err)
 		}
 	}
 	s.requestPendingScan()

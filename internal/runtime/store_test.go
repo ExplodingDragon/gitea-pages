@@ -235,7 +235,7 @@ func TestOpenStoreClosesUnconfirmedPublication(t *testing.T) {
 	}
 }
 
-func TestCleanupUntrackedContent(t *testing.T) {
+func TestRemoveUntrackedContent(t *testing.T) {
 	store, err := openStore(t.TempDir(), defaultEtcdQuotaBytes)
 	if err != nil {
 		t.Fatal(err)
@@ -248,7 +248,7 @@ func TestCleanupUntrackedContent(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if err := store.cleanupUntrackedContent(); err != nil {
+	if err := store.removeUntrackedContent(); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := os.Stat(store.siteDir(1)); err != nil {
