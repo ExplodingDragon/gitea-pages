@@ -1,8 +1,6 @@
 # Gitea Pages
 
-Gitea Pages is the website-serving companion for Gitea. It synchronizes the current Pages state from Gitea, validates and extracts each TAR.GZ artifact, publishes the result through a built-in HTTP server, and reports the outcome for display in the repository UI.
-
-The service is also available as the Go module `gitea.dev/page`. Applications with an existing web stack can implement the public `Publisher` interface and reuse the same synchronization, archive validation, local state, and reporting pipeline.
+Gitea Pages is the website-serving companion for Gitea. It runs as an independent service, synchronizes the current Pages state from Gitea, validates and extracts each TAR.GZ artifact, publishes the result through its HTTP server, and reports the outcome for display in the repository UI.
 
 ## Features
 
@@ -30,6 +28,8 @@ flowchart LR
 
 Gitea owns repository settings, artifact versions, artifact storage, and the instance registry. Each Pages process owns one local deployment of every enabled site returned by Gitea. It keeps the last confirmed deployment available while synchronization is temporarily unavailable.
 
+The built-in server redirects directory paths to their trailing-slash form before serving `index.html`. Published site files use the deployed artifact digest as an `ETag`, so browsers can revalidate cached content and observe a newly published artifact without a long cache delay.
+
 ## Requirements
 
 - Go 1.27 or later when building from source.
@@ -44,7 +44,7 @@ make build
 ./bin/gitea-pages --config /etc/gitea-pages/config.yaml
 ```
 
-The process handles `SIGINT` and `SIGTERM` with graceful HTTP and synchronization shutdown. Keep the configured data directory on persistent local storage and run one process against that directory.
+The process handles `SIGINT` and `SIGTERM` by stopping HTTP, deployment, synchronization, TXT, and certificate work before closing embedded etcd. Keep the configured data directory on persistent local storage and run one process against that directory.
 
 ## Configuration
 
@@ -141,7 +141,7 @@ With a lightweight build, selecting a provider that was not included produces a 
 <certificate-root>/hosts/<sha256-of-lowercase-host>/privkey.pem
 ```
 
-The `host` file contains the lowercase domain. Pages validates the certificate names, validity period, and private key before use. ACME certificates and account state are stored in embedded etcd.
+The `host` file contains the lowercase domain. Pages validates every configured operator certificate, name, validity period, and private key before starting; an invalid declaration is a startup configuration error. ACME certificates and account state are stored in embedded etcd. The account is bound to its ACME directory, so changing the directory reuses the private key but registers a new account and starts with independent retry state.
 
 ### Configuration reference
 
@@ -186,37 +186,6 @@ Resolver values are IP addresses with an optional port. IPv6 addresses without a
 
 Files use the same relative paths as the embedded resources. Pages checks the root and all entries at startup, accepts regular files only, and limits the custom set to 1,000 files and 16 MiB.
 
-## Use as a Go module
-
-Implement `page.Publisher` to connect the deployment pipeline to another web server:
-
-```go
-type Publisher interface {
-    Restore(context.Context, Deployments) error
-    Publish(context.Context, Deployment) (Publication, error)
-    Unpublish(context.Context, int64) error
-}
-```
-
-```go
-cfg, err := page.LoadConfig("/etc/gitea-pages/config.yaml")
-if err != nil {
-    return err
-}
-
-service, err := page.NewService(cfg, publisher, page.WithLogger(logger))
-if err != nil {
-    return err
-}
-defer service.Close()
-
-return service.Run(ctx)
-```
-
-`Content` exposes an immutable directory through `Open`, `Path`, and `Digest`. A publisher may retain it until a later successful publish or unpublish for the same repository. Calls for one repository are serialized; different repositories may be published concurrently. A failed `Publish` must restore its previous route before returning the error so the service can preserve the last confirmed content.
-
-Constructing `page.Config` directly is supported for embedded applications. `page.LoadConfig` additionally validates the built-in server fields used by `page.Run`.
-
 ## Local data
 
 ```text
@@ -244,6 +213,20 @@ make check
 ```
 
 `make check` runs formatting verification, `go vet`, the complete Go test suite, and a full build.
+
+The executable entry remains small and delegates to packages under `internal`:
+
+```text
+cmd/main.go          command-line parsing and signal handling
+internal/config      strict YAML loading, defaults, and validation
+internal/artifact    TAR.GZ validation, digest checks, and extraction
+internal/gitea       authenticated Gitea Pages protocol client
+internal/storage     embedded state, site facts, reports, and installed content
+internal/certificate certificates, TLS, ACME, DNS-01, and HTTP-01
+internal/pages       runtime assembly, synchronization, publication, HTTP, and TXT checks
+```
+
+The `storage` package owns the data-root lock, embedded etcd lifecycle, synchronized site facts, pending reports, and immutable site directories. It exposes the synchronization cursor, root-address identity, archive limits, and TXT policy as one state snapshot, so deployment decisions do not combine values from different updates. The `certificate` package owns the complete certificate and ACME lifecycle. Inside `pages`, the synchronizer only registers the instance and advances Gitea state, while the deployer owns the bounded per-repository queue, artifact installation, TXT checks, certificate maintenance, publication, and result delivery. Queue entries contain repository IDs and workers reread durable state before each deployment, so repeated updates coalesce without losing the latest target. The built-in publisher keeps route publication and rollback in one place while storage and certificate code remain independently testable.
 
 ## License
 

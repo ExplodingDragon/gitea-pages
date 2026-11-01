@@ -11,7 +11,8 @@ import (
 	"os/signal"
 	"syscall"
 
-	"gitea.dev/page"
+	pageconfig "gitea.dev/page/internal/config"
+	"gitea.dev/page/internal/pages"
 )
 
 func main() {
@@ -21,13 +22,13 @@ func main() {
 		fmt.Fprintln(os.Stderr, "usage: gitea-pages --config <path>")
 		os.Exit(2)
 	}
-	cfg, err := page.LoadConfig(*configPath)
+	cfg, err := pageconfig.Load(*configPath)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	err = page.Run(ctx, cfg)
+	err = pages.Run(ctx, cfg)
 	stop()
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
